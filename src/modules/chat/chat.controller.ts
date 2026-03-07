@@ -17,7 +17,9 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
-import { Chat, ChatDirection, User, UserRole } from '../../entities';
+import { Chat, ChatDirection, ChatMessageType, ChatSenderType, User, UserRole } from '../../entities';
+import { ChatEmitterService } from './chat-emitter.service';
+import { RoomService } from '../room/room.service';
 
 @ApiTags('Chat')
 @ApiBearerAuth()
@@ -25,7 +27,11 @@ import { Chat, ChatDirection, User, UserRole } from '../../entities';
 @Roles(UserRole.ADMIN)
 @Controller('chats')
 export class ChatController {
-  constructor(private readonly chatService: ChatService) {}
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly chatEmitterService: ChatEmitterService,
+    private readonly roomService: RoomService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Send message (sender = current admin)' })
@@ -39,6 +45,50 @@ export class ChatController {
       user.user_id,
       ChatDirection.OUT,
     );
+  }
+
+  @Post('send')
+  @ApiOperation({ summary: 'Send message to room and platform (LINE, Facebook, etc.)' })
+  @ApiResponse({ status: 201, description: 'Message sent to platform' })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  async send(
+    @Body() dto: CreateChatDto,
+    @CurrentUser() user: User,
+  ) {
+    // Create message in database
+    const chat = await this.chatService.create(
+      dto,
+      user.user_id,
+      ChatDirection.OUT,
+    );
+
+    // Send message to external platform (LINE, Facebook, Instagram)
+    try {
+      await this.chatService.sendMessageToPlatform(
+        dto.room_id,
+        dto.message,
+        dto.message_type || ChatMessageType.TEXT,
+      );
+    } catch (error) {
+      // Log error but still return the created chat
+      // The message is saved in DB even if platform send fails
+    }
+
+    // Emit new message via WebSocket for real-time updates
+    const payload = {
+      ...chat,
+      sender_name: user.username,
+      sender_type: ChatSenderType.ADMIN,
+    };
+    this.chatEmitterService.emitNewMessage(dto.room_id, payload);
+
+    // Update room's last message timestamp and emit update
+    await this.roomService.updateLastMessage(dto.room_id, chat.create_at);
+    this.chatEmitterService.emitRoomUpdated(dto.room_id, {
+      last_message_at: chat.create_at.toISOString(),
+    });
+
+    return chat;
   }
 
   @Post('webhook/inbound')

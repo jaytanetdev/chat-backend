@@ -113,4 +113,8 @@ export class RoomService {
   async resetUnread(roomId: string): Promise<void> {
     await this.roomRepository.update(roomId, { unread_count: 0 });
   }
+
+  async updateLastMessage(roomId: string, timestamp: Date): Promise<void> {
+    await this.roomRepository.update(roomId, { last_message_at: timestamp });
+  }
 }

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { CredentialService } from '../credential/credential.service';
 
 export interface LineMessage {
   type: 'text' | 'image' | 'video' | 'audio' | 'file';
@@ -31,26 +32,17 @@ export interface LineReplyMessagePayload {
 export class LineMessagingService {
   private readonly logger = new Logger(LineMessagingService.name);
   private readonly client: AxiosInstance;
-  private readonly channelAccessToken: string | undefined;
 
-  constructor(private readonly configService: ConfigService) {
-    this.channelAccessToken = this.configService.get<string>('platforms.line.channelAccessToken');
-
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly credentialService: CredentialService,
+  ) {
     this.client = axios.create({
       baseURL: 'https://api.line.me/v2/bot',
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
       },
-    });
-
-    // Add auth header interceptor
-    this.client.interceptors.request.use((config) => {
-      const token = this.configService.get<string>('platforms.line.channelAccessToken');
-      if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-      return config;
     });
 
     // Response interceptor for error handling
@@ -66,20 +58,36 @@ export class LineMessagingService {
   }
 
   /**
-   * Check if LINE is configured
+   * Get access token from database for platform
    */
-  isConfigured(): boolean {
-    return !!this.channelAccessToken;
+  private async getAccessToken(platformId: string): Promise<string | null> {
+    try {
+      const token = await this.credentialService.getAccessTokenByPlatform(platformId);
+      this.logger.debug(`LINE access token for platform ${platformId}: ${token ? 'FOUND' : 'NOT FOUND'}`);
+      return token;
+    } catch (error) {
+      this.logger.error(`Failed to get LINE access token for platform ${platformId}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Check if LINE is configured for a specific platform
+   */
+  async isConfigured(platformId: string): Promise<boolean> {
+    const token = await this.getAccessToken(platformId);
+    return !!token;
   }
 
   /**
    * Send push message to LINE user
    * https://developers.line.biz/en/reference/messaging-api/#send-push-message
    */
-  async sendPushMessage(userId: string, messages: LineMessage[]): Promise<void> {
-    if (!this.isConfigured()) {
-      this.logger.warn('LINE not configured, cannot send message');
-      throw new Error('LINE not configured');
+  async sendPushMessage(platformId: string, userId: string, messages: LineMessage[]): Promise<void> {
+    const accessToken = await this.getAccessToken(platformId);
+    if (!accessToken) {
+      this.logger.warn(`LINE not configured for platform ${platformId}, cannot send message`);
+      throw new Error(`LINE not configured for platform ${platformId}`);
     }
 
     const payload: LinePushMessagePayload = {
@@ -88,7 +96,11 @@ export class LineMessagingService {
     };
 
     try {
-      const response = await this.client.post('/message/push', payload);
+      const response = await this.client.post('/message/push', payload, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
       this.logger.debug(`LINE push message sent: ${response.status}`);
     } catch (error) {
       this.logger.error(`Failed to send LINE push message: ${error.message}`);
@@ -100,10 +112,11 @@ export class LineMessagingService {
    * Send reply message (requires reply token from webhook)
    * https://developers.line.biz/en/reference/messaging-api/#send-reply-message
    */
-  async sendReplyMessage(replyToken: string, messages: LineMessage[]): Promise<void> {
-    if (!this.isConfigured()) {
-      this.logger.warn('LINE not configured, cannot send reply');
-      throw new Error('LINE not configured');
+  async sendReplyMessage(platformId: string, replyToken: string, messages: LineMessage[]): Promise<void> {
+    const accessToken = await this.getAccessToken(platformId);
+    if (!accessToken) {
+      this.logger.warn(`LINE not configured for platform ${platformId}, cannot send reply`);
+      throw new Error(`LINE not configured for platform ${platformId}`);
     }
 
     const payload: LineReplyMessagePayload = {
@@ -112,7 +125,11 @@ export class LineMessagingService {
     };
 
     try {
-      const response = await this.client.post('/message/reply', payload);
+      const response = await this.client.post('/message/reply', payload, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
       this.logger.debug(`LINE reply message sent: ${response.status}`);
     } catch (error) {
       this.logger.error(`Failed to send LINE reply message: ${error.message}`);
@@ -123,42 +140,47 @@ export class LineMessagingService {
   /**
    * Send text message
    */
-  async sendTextMessage(userId: string, text: string): Promise<void> {
+  async sendTextMessage(platformId: string, userId: string, text: string): Promise<void> {
     const message: LineMessage = {
       type: 'text',
       text: text.slice(0, 2000), // LINE limit: 2000 characters
     };
-    await this.sendPushMessage(userId, [message]);
+    await this.sendPushMessage(platformId, userId, [message]);
   }
 
   /**
    * Send image message
    */
-  async sendImageMessage(userId: string, originalContentUrl: string, previewImageUrl?: string): Promise<void> {
+  async sendImageMessage(platformId: string, userId: string, originalContentUrl: string, previewImageUrl?: string): Promise<void> {
     const message: LineMessage = {
       type: 'image',
       originalContentUrl,
       previewImageUrl: previewImageUrl || originalContentUrl,
     };
-    await this.sendPushMessage(userId, [message]);
+    await this.sendPushMessage(platformId, userId, [message]);
   }
 
   /**
    * Get user profile
    * https://developers.line.biz/en/reference/messaging-api/#get-profile
    */
-  async getUserProfile(userId: string): Promise<{
+  async getUserProfile(platformId: string, userId: string): Promise<{
     userId: string;
     displayName: string;
     pictureUrl?: string;
     statusMessage?: string;
   }> {
-    if (!this.isConfigured()) {
-      throw new Error('LINE not configured');
+    const accessToken = await this.getAccessToken(platformId);
+    if (!accessToken) {
+      throw new Error(`LINE not configured for platform ${platformId}`);
     }
 
     try {
-      const response = await this.client.get(`/profile/${userId}`);
+      const response = await this.client.get(`/profile/${userId}`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
       return response.data;
     } catch (error) {
       this.logger.error(`Failed to get LINE user profile: ${error.message}`);

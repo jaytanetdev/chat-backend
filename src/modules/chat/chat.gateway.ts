@@ -182,25 +182,68 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const user = client.data.user;
 
     const receipts: ChatReadReceipt[] = [];
+    const processedChatIds: string[] = [];
+
     for (const chatId of data.chat_ids) {
-      const existing = await this.readReceiptRepository.findOne({
-        where: { chat_id: chatId, user_id: user.user_id },
-      });
-      if (!existing) {
-        const receipt = this.readReceiptRepository.create({
-          chat_id: chatId,
-          user_id: user.user_id,
+      try {
+        // Check if receipt already exists first (optimization)
+        const existing = await this.readReceiptRepository.findOne({
+          where: { chat_id: chatId, user_id: user.user_id },
         });
-        receipts.push(await this.readReceiptRepository.save(receipt));
+
+        if (existing) {
+          // Already exists, count as processed
+          receipts.push(existing);
+          processedChatIds.push(chatId);
+          continue;
+        }
+
+        // Use insert with ON CONFLICT DO NOTHING to handle race conditions
+        // This prevents duplicate key errors when multiple requests happen simultaneously
+        await this.readReceiptRepository
+          .createQueryBuilder()
+          .insert()
+          .into(ChatReadReceipt)
+          .values({
+            chat_id: chatId,
+            user_id: user.user_id,
+          })
+          .orIgnore() // ON CONFLICT DO NOTHING - handles duplicate key gracefully
+          .execute();
+
+        // Get the receipt (either newly created or existing from race condition)
+        const receipt = await this.readReceiptRepository.findOne({
+          where: { chat_id: chatId, user_id: user.user_id },
+        });
+
+        if (receipt) {
+          receipts.push(receipt);
+          processedChatIds.push(chatId);
+        }
+      } catch (error: any) {
+        // Fallback error handling (shouldn't happen with orIgnore, but just in case)
+        if (error.code === '23505') {
+          // Duplicate key error - receipt was created by another request
+          this.logger.debug(`Read receipt already exists for chat ${chatId} and user ${user.user_id} (race condition)`);
+          const existing = await this.readReceiptRepository.findOne({
+            where: { chat_id: chatId, user_id: user.user_id },
+          });
+          if (existing) {
+            receipts.push(existing);
+            processedChatIds.push(chatId);
+          }
+        } else {
+          this.logger.error(`Failed to mark chat ${chatId} as read: ${error.message}`, error.stack);
+        }
       }
     }
 
-    if (receipts.length > 0) {
+    if (processedChatIds.length > 0) {
       this.server.to(`room:${data.room_id}`).emit('messages_read', {
         room_id: data.room_id,
         user_id: user.user_id,
         username: user.username,
-        chat_ids: data.chat_ids,
+        chat_ids: processedChatIds,
       });
     }
 

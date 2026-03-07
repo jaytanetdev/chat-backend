@@ -295,7 +295,6 @@ export class ChatService {
     if (!room) {
       throw new AppException(ErrorCode.ROOM_NOT_FOUND, 'Room not found', HttpStatus.NOT_FOUND);
     }
-
     const platform = await this.platformService.findOne(room.platforms_id);
     if (!room.customer_identity_id) {
       throw new AppException(ErrorCode.CUSTOMER_IDENTITY_NOT_FOUND, 'Room has no customer identity', HttpStatus.NOT_FOUND);
@@ -307,15 +306,14 @@ export class ChatService {
     }
 
     const externalUserId = customerIdentity.external_user_id;
-
     try {
       switch (platform.platform_type) {
         case PlatformType.LINE:
-          if (this.lineMessagingService.isConfigured()) {
-            await this.lineMessagingService.sendTextMessage(externalUserId, content);
-          } else {
-            this.logger.warn('LINE not configured, message not sent');
-          }
+          const isConfigured = await this.lineMessagingService.isConfigured(platform.platforms_id);
+          if (isConfigured) {
+            await this.lineMessagingService.sendTextMessage(platform.platforms_id, externalUserId, content);
+            this.logger.debug('LINE message sent successfully');
+          } 
           break;
 
         case PlatformType.FACEBOOK:

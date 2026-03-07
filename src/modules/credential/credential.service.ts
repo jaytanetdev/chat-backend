@@ -87,4 +87,25 @@ export class CredentialService {
     }
     await this.credentialRepository.remove(credential);
   }
+
+  /**
+   * Get access token for platform (for internal use, returns sensitive data)
+   */
+  async getAccessTokenByPlatform(platformId: string): Promise<string | null> {
+    const credential = await this.credentialRepository.findOne({
+      where: { platforms_id: platformId },
+      order: { create_at: 'DESC' }, // Get the latest credential
+    });
+    return credential?.access_token ?? null;
+  }
+
+  /**
+   * Get credential by platform (for internal use, returns sensitive data)
+   */
+  async getCredentialByPlatform(platformId: string): Promise<Credential | null> {
+    return this.credentialRepository.findOne({
+      where: { platforms_id: platformId },
+      order: { create_at: 'DESC' }, // Get the latest credential
+    });
+  }
 }
