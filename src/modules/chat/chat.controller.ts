@@ -27,7 +27,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
-import { Chat, ChatDirection, ChatMessageType, ChatSenderType, User, UserRole } from '../../entities';
+import { Chat, ChatDirection, ChatMessageType, ChatSenderType, PlatformType, User, UserRole } from '../../entities';
 import { ChatEmitterService } from './chat-emitter.service';
 import { RoomService } from '../room/room.service';
 import { LineMessagingService } from '../line/line-messaging.service';
@@ -209,17 +209,36 @@ export class ChatController {
   }
 
   @Post('send-sticker')
-  @ApiOperation({ summary: 'Send LINE sticker to room' })
+  @ApiOperation({ summary: 'Send sticker to room (LINE native / Facebook emoji)' })
   @ApiResponse({ status: 201, description: 'Sticker sent' })
   async sendSticker(
     @Body() body: { room_id: string; package_id: string; sticker_id: string },
     @CurrentUser() user: User,
   ) {
-    const stickerUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${body.sticker_id}/android/sticker.png;compress=true`;
+    const room = await this.roomService.findOne(body.room_id);
+    const platform = room ? await this.chatService['platformService'].findOne(room.platforms_id) : null;
+    const isLine = platform?.platform_type === PlatformType.LINE;
+
+    let stickerUrl: string | undefined;
+    let emoji: string | undefined;
+
+    if (isLine) {
+      stickerUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${body.sticker_id}/android/sticker.png;compress=true`;
+    } else {
+      try {
+        if (/^[0-9a-f]{4,6}$/i.test(body.sticker_id)) {
+          emoji = String.fromCodePoint(parseInt(body.sticker_id, 16));
+        }
+      } catch {}
+      stickerUrl = `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/${body.sticker_id}.png`;
+    }
+
     const metadata: Record<string, unknown> = {
       stickerId: body.sticker_id,
       packageId: body.package_id,
-      url: stickerUrl,
+      ...(stickerUrl && { url: stickerUrl }),
+      ...(emoji && { emoji }),
+      platformType: platform?.platform_type ?? 'LINE',
     };
 
     const chat = await this.chatService.create(

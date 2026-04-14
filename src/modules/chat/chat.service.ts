@@ -372,7 +372,8 @@ export class ChatService {
           messageType = ChatMessageType.STICKER;
           messageText = '[สติกเกอร์]';
           metadata.stickerId = String(msg.sticker_id);
-          metadata.url = `https://graph.facebook.com/${senderId}/picture?type=large`;
+          metadata.platformType = 'FACEBOOK';
+          metadata.url = `https://graph.facebook.com/v25.0/${msg.sticker_id}/picture?type=large&access_token=`;
         } else if (msg.attachments && msg.attachments.length > 0) {
           const att = msg.attachments[0];
           const attUrl = att.payload?.url;
@@ -633,7 +634,7 @@ export class ChatService {
   }
 
   /**
-   * Send sticker to platform (LINE)
+   * Send sticker to platform (LINE native sticker, Facebook emoji text)
    */
   async sendStickerToPlatform(roomId: string, packageId: string, stickerId: string): Promise<void> {
     const room = await this.roomService.findOne(roomId);
@@ -656,6 +657,27 @@ export class ChatService {
           platform.platforms_id, customer.external_user_id, packageId, stickerId,
         );
       }
+    } else if (platform.platform_type === PlatformType.FACEBOOK) {
+      const isConfigured = await this.facebookMessagingService.isConfiguredForPlatform(platform.platforms_id);
+      if (isConfigured) {
+        const emoji = this.codePointToEmoji(stickerId);
+        if (emoji) {
+          await this.facebookMessagingService.sendTextMessage(
+            customer.external_user_id, emoji, platform.platforms_id,
+          );
+        }
+      }
+    }
+  }
+
+  private codePointToEmoji(stickerId: string): string | null {
+    try {
+      if (/^[0-9a-f]{4,6}$/i.test(stickerId)) {
+        return String.fromCodePoint(parseInt(stickerId, 16));
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
