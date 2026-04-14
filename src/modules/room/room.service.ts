@@ -79,6 +79,26 @@ export class RoomService {
     return { items, total, page, limit, hasMore: page * limit < total };
   }
 
+  async getUnreadSummary(): Promise<{ total: number; byPlatform: Record<string, number> }> {
+    const rows: { platform_type: string; unread: string }[] = await this.roomRepository
+      .createQueryBuilder('room')
+      .select('platform.platform_type', 'platform_type')
+      .addSelect('SUM(room.unread_count)', 'unread')
+      .leftJoin('room.platform', 'platform')
+      .where('room.unread_count > 0')
+      .groupBy('platform.platform_type')
+      .getRawMany();
+
+    const byPlatform: Record<string, number> = {};
+    let total = 0;
+    for (const row of rows) {
+      const count = parseInt(row.unread, 10) || 0;
+      if (row.platform_type) byPlatform[row.platform_type] = count;
+      total += count;
+    }
+    return { total, byPlatform };
+  }
+
   async findOne(id: string): Promise<Room> {
     const room = await this.roomRepository.findOne({
       where: { room_id: id },

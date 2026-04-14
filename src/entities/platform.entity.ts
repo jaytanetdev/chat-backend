@@ -20,6 +20,7 @@ export enum PlatformType {
   INSTAGRAM = 'INSTAGRAM',
   SHOPEE = 'SHOPEE',
   LAZADA = 'LAZADA',
+  TIKTOK = 'TIKTOK',
 }
 
 @Entity('platforms')

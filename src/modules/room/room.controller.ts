@@ -56,6 +56,13 @@ export class RoomController {
     });
   }
 
+  @Get('unread-summary')
+  @ApiOperation({ summary: 'Get unread message count per platform' })
+  @ApiResponse({ status: 200, description: 'Unread summary' })
+  getUnreadSummary() {
+    return this.roomService.getUnreadSummary();
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get room by id with members' })
   @ApiResponse({ status: 200, description: 'Room found' })
