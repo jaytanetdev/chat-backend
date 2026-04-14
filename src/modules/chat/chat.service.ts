@@ -14,6 +14,7 @@ import { FacebookMessagingService } from '../facebook/facebook-messaging.service
 import { InstagramMessagingService } from '../instagram/instagram-messaging.service';
 import { PlatformType } from '../../entities/platform.entity';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import axios from 'axios';
 
 @Injectable()
 export class ChatService {
@@ -324,6 +325,215 @@ export class ChatService {
   }
 
   /**
+   * Process inbound Facebook Messenger webhook.
+   * Normalized from the raw Facebook body format into chat records.
+   */
+  async processInboundFacebook(body: {
+    object: string;
+    entry: Array<{
+      id: string;
+      time: number;
+      messaging: Array<{
+        sender: { id: string };
+        recipient: { id: string };
+        timestamp: number;
+        message?: {
+          mid: string;
+          text?: string;
+          attachments?: Array<{ type: string; payload: { url?: string } }>;
+          sticker_id?: number;
+        };
+      }>;
+    }>;
+  }): Promise<void> {
+    for (const entry of body.entry) {
+      const pageId = entry.id;
+
+      const platform = await this.platformService.findOneByExternalAccountId(pageId);
+      if (!platform) {
+        this.logger.warn(`No platform found for Facebook page ID: ${pageId}`);
+        continue;
+      }
+
+      for (const event of entry.messaging ?? []) {
+        if (!event.message) continue;
+
+        const senderId = event.sender.id;
+        if (senderId === pageId) continue;
+
+        const msg = event.message;
+        const externalMessageId = msg.mid;
+
+        let messageType = ChatMessageType.TEXT;
+        let messageText = msg.text ?? '';
+        const metadata: Record<string, unknown> = {};
+
+        if (msg.sticker_id) {
+          messageType = ChatMessageType.STICKER;
+          messageText = '[สติกเกอร์]';
+          metadata.stickerId = String(msg.sticker_id);
+          metadata.url = `https://graph.facebook.com/${senderId}/picture?type=large`;
+        } else if (msg.attachments && msg.attachments.length > 0) {
+          const att = msg.attachments[0];
+          const attUrl = att.payload?.url;
+
+          switch (att.type) {
+            case 'image':
+              messageType = ChatMessageType.IMAGE;
+              messageText = '[รูปภาพ]';
+              if (attUrl) { metadata.url = attUrl; metadata.previewUrl = attUrl; }
+              break;
+            case 'video':
+              messageType = ChatMessageType.VIDEO;
+              messageText = '[วิดีโอ]';
+              if (attUrl) { metadata.url = attUrl; metadata.previewUrl = attUrl; }
+              break;
+            case 'audio':
+              messageType = ChatMessageType.AUDIO;
+              messageText = '[เสียง]';
+              if (attUrl) { metadata.url = attUrl; }
+              break;
+            case 'file':
+              messageType = ChatMessageType.FILE;
+              messageText = '[ไฟล์]';
+              if (attUrl) { metadata.url = attUrl; }
+              break;
+            default:
+              if (attUrl) { metadata.url = attUrl; }
+          }
+
+          if (msg.attachments.length > 1) {
+            metadata.allAttachments = msg.attachments.map((a) => ({
+              type: a.type,
+              url: a.payload?.url,
+            }));
+          }
+        }
+
+        let displayName: string | undefined;
+        let avatarUrl: string | undefined;
+        try {
+          const profile = await this.facebookMessagingService.getUserProfile(senderId, platform.platforms_id);
+          displayName = profile.name;
+          avatarUrl = profile.profile_pic;
+        } catch (err) {
+          this.logger.warn(`Failed to fetch FB profile for ${senderId}: ${err.message}`);
+        }
+
+        let customerIdentity = await this.customerIdentityService.findOrCreate(
+          platform.platforms_id,
+          senderId,
+          displayName,
+        );
+
+        if (avatarUrl && !customerIdentity.avatar_url) {
+          try {
+            customerIdentity = await this.customerIdentityService.updateProfile(
+              customerIdentity.customer_identity_id,
+              displayName,
+              avatarUrl,
+            );
+          } catch { /* non-critical */ }
+        }
+
+        let room = await this.roomService.findOneByPlatformAndCustomer(
+          platform.platforms_id,
+          customerIdentity.customer_identity_id,
+        );
+        if (!room) {
+          room = await this.roomService.create({
+            platforms_id: platform.platforms_id,
+            customer_identity_id: customerIdentity.customer_identity_id,
+            status: RoomStatus.ACTIVE,
+          });
+        }
+
+        const userPlatforms = await this.userPlatformService.findByPlatform(platform.platforms_id);
+        for (const up of userPlatforms) {
+          await this.roomService.addMemberIfNotExists(room.room_id, up.user_id);
+        }
+
+        const existingChat = externalMessageId
+          ? await this.chatRepository.findOne({
+              where: { room_id: room.room_id, external_message_id: externalMessageId },
+            })
+          : null;
+
+        let chat: Chat;
+        if (existingChat) {
+          existingChat.message = messageText;
+          existingChat.message_type = messageType;
+          if (Object.keys(metadata).length) existingChat.metadata = metadata;
+          chat = await this.chatRepository.save(existingChat);
+        } else {
+          chat = this.chatRepository.create({
+            room_id: room.room_id,
+            sender_type: ChatSenderType.CUSTOMER,
+            sender_id: customerIdentity.customer_identity_id,
+            direction: ChatDirection.IN,
+            external_message_id: externalMessageId ?? null,
+            message: messageText,
+            message_type: messageType,
+            metadata: Object.keys(metadata).length ? metadata : null,
+            is_read: false,
+          });
+          chat = await this.chatRepository.save(chat);
+        }
+
+        await this.roomService.incrementUnread(room.room_id, messageText);
+
+        this.chatEmitterService.emitNewMessage(room.room_id, {
+          ...chat,
+          sender_name: customerIdentity.display_name ?? customerIdentity.external_user_id,
+        });
+        this.chatEmitterService.emitRoomUpdated(room.room_id, {
+          unread_count: (room.unread_count ?? 0) + 1,
+          last_message_at: new Date().toISOString(),
+          last_message_text: messageText,
+        });
+
+        if (messageType === ChatMessageType.IMAGE && metadata.url && this.cloudinaryService.isConfigured()) {
+          this.uploadFacebookMediaToCloudinary(
+            chat.chat_id, room.room_id, metadata.url as string,
+            'image', customerIdentity.display_name ?? senderId,
+            customerIdentity.customer_identity_id,
+          ).catch((err) => this.logger.warn(`FB Cloudinary upload failed: ${err.message}`));
+        }
+
+        this.logger.debug(`Facebook inbound processed: room=${room.room_id}, type=${messageType}`);
+      }
+    }
+  }
+
+  private async uploadFacebookMediaToCloudinary(
+    chatId: string, roomId: string, mediaUrl: string,
+    type: 'image' | 'video' | 'raw', senderName: string, senderId: string,
+  ): Promise<void> {
+    const response = await axios.get(mediaUrl, { responseType: 'arraybuffer', timeout: 60000 });
+    const buffer = Buffer.from(response.data);
+    const resourceType = type === 'image' ? 'image' as const : type === 'video' ? 'video' as const : 'raw' as const;
+
+    const uploaded = await this.cloudinaryService.uploadBuffer(buffer, {
+      folder: `chat/room_${roomId}/user_${senderId}`,
+      resourceType,
+    });
+
+    const chat = await this.chatRepository.findOne({ where: { chat_id: chatId } });
+    if (!chat) return;
+
+    const existingMeta = (chat.metadata as Record<string, unknown>) ?? {};
+    chat.metadata = {
+      ...existingMeta,
+      url: uploaded.secure_url,
+      previewUrl: uploaded.secure_url,
+      cloudinaryPublicId: uploaded.public_id,
+    };
+    await this.chatRepository.save(chat);
+
+    this.chatEmitterService.emitNewMessage(roomId, { ...chat, sender_name: senderName });
+  }
+
+  /**
    * Send message to platform (LINE, Facebook, Instagram)
    * Called when admin sends a message from the chat UI
    */
@@ -357,13 +567,16 @@ export class ChatService {
           } 
           break;
 
-        case PlatformType.FACEBOOK:
-          if (this.facebookMessagingService.isConfigured()) {
-            await this.facebookMessagingService.sendTextMessage(externalUserId, content);
+        case PlatformType.FACEBOOK: {
+          const fbConfigured = await this.facebookMessagingService.isConfiguredForPlatform(platform.platforms_id);
+          if (fbConfigured) {
+            await this.facebookMessagingService.sendTextMessage(externalUserId, content, platform.platforms_id);
+            this.logger.debug('Facebook message sent successfully');
           } else {
             this.logger.warn('Facebook not configured, message not sent');
           }
           break;
+        }
 
         case PlatformType.INSTAGRAM:
           if (this.instagramMessagingService.isConfigured()) {
@@ -387,11 +600,11 @@ export class ChatService {
   }
 
   /**
-   * Send image to platform (LINE). For data URIs, we skip since LINE needs public URLs.
+   * Send image to platform (LINE, Facebook). For data URIs, we skip since platforms need public URLs.
    */
   async sendImageToPlatform(roomId: string, imageUrl: string): Promise<void> {
     if (imageUrl.startsWith('data:')) {
-      this.logger.debug('Skipping LINE image send for data URI (requires public URL)');
+      this.logger.debug('Skipping image send for data URI (requires public URL)');
       return;
     }
     const room = await this.roomService.findOne(roomId);
@@ -401,10 +614,20 @@ export class ChatService {
     const customer = await this.customerIdentityService.findOne(room.customer_identity_id);
     if (!customer?.external_user_id) return;
 
-    if (platform.platform_type === PlatformType.LINE) {
-      const isConfigured = await this.lineMessagingService.isConfigured(platform.platforms_id);
-      if (isConfigured) {
-        await this.lineMessagingService.sendImageMessage(platform.platforms_id, customer.external_user_id, imageUrl);
+    switch (platform.platform_type) {
+      case PlatformType.LINE: {
+        const isConfigured = await this.lineMessagingService.isConfigured(platform.platforms_id);
+        if (isConfigured) {
+          await this.lineMessagingService.sendImageMessage(platform.platforms_id, customer.external_user_id, imageUrl);
+        }
+        break;
+      }
+      case PlatformType.FACEBOOK: {
+        const fbConfigured = await this.facebookMessagingService.isConfiguredForPlatform(platform.platforms_id);
+        if (fbConfigured) {
+          await this.facebookMessagingService.sendImageMessage(customer.external_user_id, imageUrl, platform.platforms_id);
+        }
+        break;
       }
     }
   }
@@ -569,6 +792,14 @@ export class ChatService {
         );
         displayName = profile.displayName;
         avatarUrl = profile.pictureUrl;
+        break;
+      }
+      case PlatformType.FACEBOOK: {
+        const fbConfigured = await this.facebookMessagingService.isConfiguredForPlatform(platform.platforms_id);
+        if (!fbConfigured) break;
+        const fbProfile = await this.facebookMessagingService.getUserProfile(externalUserId, platform.platforms_id);
+        displayName = fbProfile.name;
+        avatarUrl = fbProfile.profile_pic;
         break;
       }
       default:

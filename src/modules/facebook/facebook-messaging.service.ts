@@ -1,62 +1,45 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { CredentialService } from '../credential/credential.service';
 
 export interface FacebookMessageAttachment {
   type: 'image' | 'video' | 'audio' | 'file';
   payload: {
-    url: string;
+    url?: string;
+    is_reusable?: boolean;
   };
-}
-
-export interface FacebookQuickReply {
-  content_type?: 'text' | 'location' | 'user_phone_number' | 'user_email';
-  title: string;
-  payload: string;
-  image_url?: string;
 }
 
 export interface FacebookMessage {
   text?: string;
   attachment?: FacebookMessageAttachment;
-  quick_replies?: FacebookQuickReply[];
 }
 
 export interface FacebookSendMessagePayload {
-  recipient: {
-    id: string;
-  };
+  recipient: { id: string };
   message: FacebookMessage;
   messaging_type?: 'RESPONSE' | 'UPDATE' | 'MESSAGE_TAG';
-  notification_type?: 'REGULAR' | 'SILENT_PUSH' | 'NO_PUSH';
 }
 
 @Injectable()
 export class FacebookMessagingService {
   private readonly logger = new Logger(FacebookMessagingService.name);
   private readonly client: AxiosInstance;
-  private readonly pageAccessToken: string | undefined;
-  private readonly apiVersion = 'v18.0';
+  private readonly apiVersion = 'v25.0';
+  private readonly fallbackPageAccessToken: string | undefined;
 
-  constructor(private readonly configService: ConfigService) {
-    this.pageAccessToken = this.configService.get<string>('platforms.facebook.pageAccessToken');
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly credentialService: CredentialService,
+  ) {
+    this.fallbackPageAccessToken = this.configService.get<string>('platforms.facebook.pageAccessToken');
 
     this.client = axios.create({
       baseURL: `https://graph.facebook.com/${this.apiVersion}`,
       timeout: 30000,
     });
 
-    // Add access token to all requests
-    this.client.interceptors.request.use((config) => {
-      const token = this.configService.get<string>('platforms.facebook.pageAccessToken');
-      if (token) {
-        config.params = config.params || {};
-        config.params.access_token = token;
-      }
-      return config;
-    });
-
-    // Error handling
     this.client.interceptors.response.use(
       (response) => response,
       (error) => {
@@ -69,22 +52,36 @@ export class FacebookMessagingService {
   }
 
   /**
-   * Check if Facebook is configured
+   * Get page access token — first try credential DB, then fallback to env var
    */
-  isConfigured(): boolean {
-    return !!this.pageAccessToken;
+  private async getAccessToken(platformId?: string): Promise<string | null> {
+    if (platformId) {
+      try {
+        const token = await this.credentialService.getAccessTokenByPlatform(platformId);
+        if (token) return token;
+      } catch (error) {
+        this.logger.warn(`Failed to get FB token from DB for platform ${platformId}: ${error.message}`);
+      }
+    }
+    return this.fallbackPageAccessToken ?? null;
   }
 
-  /**
-   * Send message to Facebook user
-   * https://developers.facebook.com/docs/messenger-platform/reference/send-api/
-   */
-  async sendMessage(recipientId: string, message: FacebookMessage): Promise<{
-    recipient_id: string;
-    message_id: string;
-  }> {
-    if (!this.isConfigured()) {
-      this.logger.warn('Facebook not configured, cannot send message');
+  isConfigured(): boolean {
+    return !!this.fallbackPageAccessToken;
+  }
+
+  async isConfiguredForPlatform(platformId: string): Promise<boolean> {
+    const token = await this.getAccessToken(platformId);
+    return !!token;
+  }
+
+  async sendMessage(
+    recipientId: string,
+    message: FacebookMessage,
+    platformId?: string,
+  ): Promise<{ recipient_id: string; message_id: string }> {
+    const token = await this.getAccessToken(platformId);
+    if (!token) {
       throw new Error('Facebook not configured');
     }
 
@@ -94,86 +91,63 @@ export class FacebookMessagingService {
       messaging_type: 'RESPONSE',
     };
 
-    try {
-      const response = await this.client.post('/me/messages', payload);
-      this.logger.debug(`Facebook message sent: ${response.data.message_id}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error(`Failed to send Facebook message: ${error.message}`);
-      throw error;
-    }
+    const response = await this.client.post('/me/messages', payload, {
+      params: { access_token: token },
+    });
+    this.logger.debug(`Facebook message sent: ${response.data.message_id}`);
+    return response.data;
   }
 
-  /**
-   * Send text message
-   */
-  async sendTextMessage(recipientId: string, text: string): Promise<void> {
-    const message: FacebookMessage = {
-      text: text.slice(0, 2000), // Facebook limit: 2000 characters
-    };
-    await this.sendMessage(recipientId, message);
+  async sendTextMessage(recipientId: string, text: string, platformId?: string): Promise<void> {
+    await this.sendMessage(recipientId, { text: text.slice(0, 2000) }, platformId);
   }
 
-  /**
-   * Send image message
-   */
-  async sendImageMessage(recipientId: string, imageUrl: string): Promise<void> {
-    const message: FacebookMessage = {
-      attachment: {
-        type: 'image',
-        payload: { url: imageUrl },
-      },
-    };
-    await this.sendMessage(recipientId, message);
+  async sendImageMessage(recipientId: string, imageUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'image', payload: { url: imageUrl, is_reusable: true } } },
+      platformId,
+    );
   }
 
-  /**
-   * Send message with quick replies
-   */
-  async sendQuickReplyMessage(
-    recipientId: string,
-    text: string,
-    quickReplies: FacebookQuickReply[],
-  ): Promise<void> {
-    const message: FacebookMessage = {
-      text,
-      quick_replies: quickReplies.slice(0, 13), // Max 13 quick replies
-    };
-    await this.sendMessage(recipientId, message);
+  async sendVideoMessage(recipientId: string, videoUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'video', payload: { url: videoUrl, is_reusable: true } } },
+      platformId,
+    );
   }
 
-  /**
-   * Get user profile
-   * https://developers.facebook.com/docs/messenger-platform/identity/user-profile/
-   */
-  async getUserProfile(userId: string, pageAccessToken?: string): Promise<{
+  async sendAudioMessage(recipientId: string, audioUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'audio', payload: { url: audioUrl, is_reusable: true } } },
+      platformId,
+    );
+  }
+
+  async sendFileMessage(recipientId: string, fileUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'file', payload: { url: fileUrl, is_reusable: true } } },
+      platformId,
+    );
+  }
+
+  async getUserProfile(userId: string, platformId?: string): Promise<{
     id: string;
     name: string;
     profile_pic?: string;
   }> {
-    const token = pageAccessToken || this.pageAccessToken;
-    if (!token) {
-      throw new Error('Facebook not configured');
-    }
+    const token = await this.getAccessToken(platformId);
+    if (!token) throw new Error('Facebook not configured');
 
-    try {
-      const response = await this.client.get(`/${userId}`, {
-        params: {
-          access_token: token,
-          fields: 'id,name,profile_pic',
-        },
-      });
-      return response.data;
-    } catch (error) {
-      this.logger.error(`Failed to get Facebook user profile: ${error.message}`);
-      throw error;
-    }
+    const response = await this.client.get(`/${userId}`, {
+      params: { access_token: token, fields: 'id,name,profile_pic' },
+    });
+    return response.data;
   }
 
-  /**
-   * Validate webhook signature
-   * https://developers.facebook.com/docs/messenger-platform/webhooks#security
-   */
   validateSignature(body: string, signature: string, appSecret: string): boolean {
     const crypto = require('crypto');
     const expected = crypto
@@ -181,18 +155,5 @@ export class FacebookMessagingService {
       .update(body, 'utf8')
       .digest('hex');
     return signature === `sha256=${expected}`;
-  }
-
-  /**
-   * Verify webhook (for initial setup)
-   * https://developers.facebook.com/docs/messenger-platform/webhooks#verification-requests
-   */
-  verifyWebhook(mode: string, token: string, challenge: string, verifyToken: string): string | null {
-    if (mode === 'subscribe' && token === verifyToken) {
-      this.logger.log('Facebook webhook verified');
-      return challenge;
-    }
-    this.logger.warn('Facebook webhook verification failed');
-    return null;
   }
 }

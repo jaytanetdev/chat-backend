@@ -98,29 +98,28 @@ export class WebhooksController {
   @Post('facebook')
   @HttpCode(200)
   @ApiOperation({ summary: 'Receive Facebook webhook events' })
-  async handleFacebookWebhook(
+  handleFacebookWebhook(
     @Req() req: Request,
     @Headers('x-hub-signature-256') signature: string,
     @Body() body: any,
-  ): Promise<{ status: string; processed: number }> {
-    this.logger.debug(`Received Facebook webhook: ${JSON.stringify(body)}`);
+  ): { status: string } {
+    this.logger.debug(`Received Facebook webhook: ${JSON.stringify(body).substring(0, 500)}`);
 
-    // Verify signature
     if (signature) {
       const isValid = this.facebookWebhookService.verifySignature(JSON.stringify(req.body), signature);
       if (!isValid) {
         this.logger.warn('Invalid Facebook webhook signature');
-        return { status: 'error', processed: 0 };
+        return { status: 'ok' };
       }
     }
 
-    // Process webhook
-    const result = await this.facebookWebhookService.processWebhook(body);
+    if (body.object === 'page' && body.entry) {
+      this.chatService.processInboundFacebook(body).catch((err) =>
+        this.logger.error(`Error processing Facebook webhook: ${err.message}`, err.stack),
+      );
+    }
 
-    return {
-      status: 'success',
-      processed: result.processed,
-    };
+    return { status: 'ok' };
   }
 
   /**
