@@ -16,6 +16,7 @@ import {
   RoomMember,
   Chat,
   ChatReadReceipt,
+  QuickReply,
 } from './entities';
 import { AuthModule } from './modules/auth/auth.module';
 import { ShopModule } from './modules/shop/shop.module';
@@ -32,6 +33,8 @@ import { InstagramModule } from './modules/instagram/instagram.module';
 import { ShopeeModule } from './modules/shopee/shopee.module';
 import { LazadaModule } from './modules/lazada/lazada.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { QuickReplyModule } from './modules/quick-reply/quick-reply.module';
+import { CloudinaryModule } from './modules/cloudinary/cloudinary.module';
 
 @Module({
   imports: [
@@ -49,11 +52,12 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
         username: configService.get('database.username'),
         password: configService.get('database.password'),
         database: configService.get('database.database'),
-        entities: [Shop, Platform, Credential, CustomerIdentity, User, UserPlatform, Room, RoomMember, Chat, ChatReadReceipt],
+        entities: [Shop, Platform, Credential, CustomerIdentity, User, UserPlatform, Room, RoomMember, Chat, ChatReadReceipt, QuickReply],
         synchronize: configService.get('nodeEnv') === 'development',
       }),
       inject: [ConfigService],
     }),
+    CloudinaryModule,
     AuthModule,
     ShopModule,
     PlatformModule,
@@ -69,6 +73,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     ShopeeModule,
     LazadaModule,
     WebhooksModule,
+    QuickReplyModule,
   ],
   controllers: [AppController],
   providers: [AppService],

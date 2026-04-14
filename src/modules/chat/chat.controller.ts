@@ -10,9 +10,14 @@ import {
   HttpCode,
   HttpStatus,
   Logger,
+  UseInterceptors,
+  UploadedFile,
+  ParseFilePipe,
+  MaxFileSizeValidator,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { ChatService } from './chat.service';
 import { CreateChatDto } from './dto/create-chat.dto';
 import { InboundWebhookDto } from './dto/inbound-webhook.dto';
@@ -26,6 +31,7 @@ import { Chat, ChatDirection, ChatMessageType, ChatSenderType, User, UserRole } 
 import { ChatEmitterService } from './chat-emitter.service';
 import { RoomService } from '../room/room.service';
 import { LineMessagingService } from '../line/line-messaging.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 @ApiTags('Chat')
 @ApiBearerAuth()
@@ -40,6 +46,7 @@ export class ChatController {
     private readonly chatEmitterService: ChatEmitterService,
     private readonly roomService: RoomService,
     private readonly lineMessagingService: LineMessagingService,
+    private readonly cloudinaryService: CloudinaryService,
   ) {}
 
   @Post()
@@ -91,10 +98,112 @@ export class ChatController {
     };
     this.chatEmitterService.emitNewMessage(dto.room_id, payload);
 
-    // Update room's last message timestamp and emit update
-    await this.roomService.updateLastMessage(dto.room_id, chat.create_at);
+    await this.roomService.updateLastMessage(dto.room_id, chat.create_at, dto.message);
     this.chatEmitterService.emitRoomUpdated(dto.room_id, {
       last_message_at: chat.create_at.toISOString(),
+      last_message_text: dto.message,
+    });
+
+    return chat;
+  }
+
+  @Post('send-media')
+  @ApiOperation({ summary: 'Send media message (image/file) — Cloudinary or local fallback' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+        room_id: { type: 'string' },
+        message_type: { type: 'string', enum: ['IMAGE', 'VIDEO', 'AUDIO', 'FILE'] },
+      },
+    },
+  })
+  @UseInterceptors(FileInterceptor('file'))
+  async sendMedia(
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [new MaxFileSizeValidator({ maxSize: 50 * 1024 * 1024 })],
+      }),
+    )
+    file: Express.Multer.File,
+    @Body('room_id') roomId: string,
+    @Body('message_type') messageType: string,
+    @CurrentUser() user: User,
+  ) {
+    const isImage = (messageType?.toUpperCase() === 'IMAGE') || file.mimetype.startsWith('image/');
+    const isVideo = file.mimetype.startsWith('video/');
+    const effectiveType = isImage
+      ? ChatMessageType.IMAGE
+      : isVideo
+        ? ChatMessageType.VIDEO
+        : ChatMessageType.FILE;
+
+    let fileUrl: string;
+    const metadata: Record<string, unknown> = {
+      fileName: file.originalname,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+    };
+
+    if (this.cloudinaryService.isConfigured()) {
+      const resourceType = isImage ? 'image' as const : isVideo ? 'video' as const : 'raw' as const;
+      const uploaded = await this.cloudinaryService.uploadBuffer(file.buffer, {
+        folder: `chat/room_${roomId}/user_${user.user_id}`,
+        resourceType,
+      });
+      fileUrl = uploaded.secure_url;
+      metadata.cloudinaryPublicId = uploaded.public_id;
+      if (uploaded.width) metadata.width = uploaded.width;
+      if (uploaded.height) metadata.height = uploaded.height;
+    } else {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const crypto = await import('crypto');
+      const ext = path.extname(file.originalname) || '';
+      const filename = `${crypto.randomUUID()}${ext}`;
+      const uploadDir = path.join(process.cwd(), 'uploads', `room_${roomId}`, `user_${user.user_id}`);
+      await fs.mkdir(uploadDir, { recursive: true });
+      await fs.writeFile(path.join(uploadDir, filename), file.buffer);
+      fileUrl = `/uploads/room_${roomId}/user_${user.user_id}/${filename}`;
+    }
+
+    metadata.url = fileUrl;
+    metadata.previewUrl = fileUrl;
+
+    const messageText = isImage ? '[รูปภาพ]' : isVideo ? '[วิดีโอ]' : file.originalname;
+
+    const chat = await this.chatService.create(
+      {
+        room_id: roomId,
+        message: messageText,
+        message_type: effectiveType,
+        metadata,
+      },
+      user.user_id,
+      ChatDirection.OUT,
+    );
+
+    try {
+      if (isImage && fileUrl.startsWith('http')) {
+        await this.chatService.sendImageToPlatform(roomId, fileUrl);
+      }
+    } catch (error) {
+      this.logger.warn(`Platform media send failed: ${error.message}`);
+    }
+
+    const payload = {
+      ...chat,
+      sender_name: user.username,
+      sender_type: ChatSenderType.ADMIN,
+    };
+    this.chatEmitterService.emitNewMessage(roomId, payload);
+
+    await this.roomService.updateLastMessage(roomId, chat.create_at, messageText);
+    this.chatEmitterService.emitRoomUpdated(roomId, {
+      last_message_at: chat.create_at.toISOString(),
+      last_message_text: messageText,
     });
 
     return chat;

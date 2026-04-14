@@ -45,6 +45,9 @@ export class Room {
   @Column({ name: 'last_message_at', type: 'timestamptz', nullable: true })
   last_message_at: Date | null;
 
+  @Column({ name: 'last_message_text', type: 'varchar', length: 255, nullable: true })
+  last_message_text: string | null;
+
   @Column({
     name: 'status',
     type: 'enum',

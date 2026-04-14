@@ -13,6 +13,7 @@ import { LineMessagingService } from '../line/line-messaging.service';
 import { FacebookMessagingService } from '../facebook/facebook-messaging.service';
 import { InstagramMessagingService } from '../instagram/instagram-messaging.service';
 import { PlatformType } from '../../entities/platform.entity';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 @Injectable()
 export class ChatService {
@@ -29,6 +30,7 @@ export class ChatService {
     private readonly lineMessagingService: LineMessagingService,
     private readonly facebookMessagingService: FacebookMessagingService,
     private readonly instagramMessagingService: InstagramMessagingService,
+    private readonly cloudinaryService: CloudinaryService,
   ) {}
 
   async create(
@@ -182,7 +184,7 @@ export class ChatService {
       chat = await this.chatRepository.save(chat);
     }
 
-    await this.roomService.incrementUnread(room.room_id);
+    await this.roomService.incrementUnread(room.room_id, messageText);
 
     this.chatEmitterService.emitNewMessage(room.room_id, {
       ...chat,
@@ -191,7 +193,23 @@ export class ChatService {
     this.chatEmitterService.emitRoomUpdated(room.room_id, {
       unread_count: (room.unread_count ?? 0) + 1,
       last_message_at: new Date().toISOString(),
+      last_message_text: messageText,
     });
+
+    // Background: upload LINE-hosted media to Cloudinary for a permanent URL
+    if (isMediaType && messageType !== 'STICKER' && externalMessageId && this.cloudinaryService.isConfigured()) {
+      this.uploadInboundMediaToCloudinary(
+        chat.chat_id,
+        room.room_id,
+        platform.platforms_id,
+        externalMessageId,
+        messageType,
+        customerIdentity.display_name ?? customerIdentity.external_user_id,
+        customerIdentity.customer_identity_id,
+      ).catch((err) =>
+        this.logger.warn(`Cloudinary upload failed for chat ${chat.chat_id}: ${err.message}`),
+      );
+    }
 
     return {
       platform_id: platform.platforms_id,
@@ -366,6 +384,75 @@ export class ChatService {
         HttpStatus.BAD_GATEWAY,
       );
     }
+  }
+
+  /**
+   * Send image to platform (LINE). For data URIs, we skip since LINE needs public URLs.
+   */
+  async sendImageToPlatform(roomId: string, imageUrl: string): Promise<void> {
+    if (imageUrl.startsWith('data:')) {
+      this.logger.debug('Skipping LINE image send for data URI (requires public URL)');
+      return;
+    }
+    const room = await this.roomService.findOne(roomId);
+    if (!room) return;
+    const platform = await this.platformService.findOne(room.platforms_id);
+    if (!room.customer_identity_id) return;
+    const customer = await this.customerIdentityService.findOne(room.customer_identity_id);
+    if (!customer?.external_user_id) return;
+
+    if (platform.platform_type === PlatformType.LINE) {
+      const isConfigured = await this.lineMessagingService.isConfigured(platform.platforms_id);
+      if (isConfigured) {
+        await this.lineMessagingService.sendImageMessage(platform.platforms_id, customer.external_user_id, imageUrl);
+      }
+    }
+  }
+
+  /**
+   * Fetch LINE-hosted media content and upload to Cloudinary.
+   * Runs in background — updates the chat metadata with the permanent Cloudinary URL.
+   */
+  private async uploadInboundMediaToCloudinary(
+    chatId: string,
+    roomId: string,
+    platformId: string,
+    externalMessageId: string,
+    messageType: string,
+    senderName: string,
+    senderId: string,
+  ): Promise<void> {
+    const { data, contentType } = await this.lineMessagingService.getMessageContent(platformId, externalMessageId);
+
+    const resourceType = contentType.startsWith('image/')
+      ? 'image' as const
+      : contentType.startsWith('video/')
+        ? 'video' as const
+        : 'raw' as const;
+
+    const uploaded = await this.cloudinaryService.uploadBuffer(data, {
+      folder: `chat/room_${roomId}/user_${senderId}`,
+      resourceType,
+    });
+
+    const chat = await this.chatRepository.findOne({ where: { chat_id: chatId } });
+    if (!chat) return;
+
+    const existingMeta = (chat.metadata as Record<string, unknown>) ?? {};
+    chat.metadata = {
+      ...existingMeta,
+      url: uploaded.secure_url,
+      previewUrl: uploaded.secure_url,
+      cloudinaryPublicId: uploaded.public_id,
+    };
+    await this.chatRepository.save(chat);
+
+    this.chatEmitterService.emitNewMessage(roomId, {
+      ...chat,
+      sender_name: senderName,
+    });
+
+    this.logger.debug(`Uploaded LINE media ${externalMessageId} to Cloudinary: ${uploaded.secure_url}`);
   }
 
   /**

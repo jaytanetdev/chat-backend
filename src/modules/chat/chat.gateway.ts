@@ -87,15 +87,13 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { room_id: string },
   ) {
+    if (!client.data?.user) return { event: 'error', message: 'Not authenticated' };
     const roomKey = `room:${data.room_id}`;
     await client.join(roomKey);
 
     await this.roomService.resetUnread(data.room_id);
 
-    this.server.to(roomKey).emit('room_updated', {
-      room_id: data.room_id,
-      unread_count: 0,
-    });
+    this.chatEmitterService.emitRoomUpdated(data.room_id, { unread_count: 0 });
 
     this.logger.log(`${client.data.user.username} joined ${roomKey}`);
     return { event: 'joined', room_id: data.room_id };
@@ -106,6 +104,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { room_id: string },
   ) {
+    if (!client.data?.user) return { event: 'error', message: 'Not authenticated' };
     const roomKey = `room:${data.room_id}`;
     await client.leave(roomKey);
     this.logger.log(`${client.data.user.username} left ${roomKey}`);

@@ -8,3 +8,4 @@ export { Room, RoomStatus } from './room.entity';
 export { RoomMember, RoomMemberRole } from './room-member.entity';
 export { Chat, ChatDirection, ChatSenderType, ChatMessageType } from './chat.entity';
 export { ChatReadReceipt } from './chat-read-receipt.entity';
+export { QuickReply } from './quick-reply.entity';

@@ -28,7 +28,7 @@ export class RoomService {
   async findAll(): Promise<Room[]> {
     return this.roomRepository.find({
       relations: ['platform', 'customer_identity', 'assigned_user', 'room_members', 'room_members.user'],
-      order: { update_at: 'DESC' },
+      order: { last_message_at: { direction: 'DESC', nulls: 'LAST' } },
     });
   }
 
@@ -36,7 +36,7 @@ export class RoomService {
     return this.roomRepository.find({
       where: { platforms_id: platformId },
       relations: ['platform', 'customer_identity', 'assigned_user', 'room_members', 'room_members.user'],
-      order: { update_at: 'DESC' },
+      order: { last_message_at: { direction: 'DESC', nulls: 'LAST' } },
     });
   }
 
@@ -105,16 +105,24 @@ export class RoomService {
     await this.roomMemberRepository.remove(member);
   }
 
-  async incrementUnread(roomId: string): Promise<void> {
+  async incrementUnread(roomId: string, messageText?: string): Promise<void> {
     await this.roomRepository.increment({ room_id: roomId }, 'unread_count', 1);
-    await this.roomRepository.update(roomId, { last_message_at: new Date() });
+    const update: Record<string, unknown> = { last_message_at: new Date() };
+    if (messageText !== undefined) {
+      update.last_message_text = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
+    }
+    await this.roomRepository.update(roomId, update);
   }
 
   async resetUnread(roomId: string): Promise<void> {
     await this.roomRepository.update(roomId, { unread_count: 0 });
   }
 
-  async updateLastMessage(roomId: string, timestamp: Date): Promise<void> {
-    await this.roomRepository.update(roomId, { last_message_at: timestamp });
+  async updateLastMessage(roomId: string, timestamp: Date, messageText?: string): Promise<void> {
+    const update: Record<string, unknown> = { last_message_at: timestamp };
+    if (messageText !== undefined) {
+      update.last_message_text = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
+    }
+    await this.roomRepository.update(roomId, update);
   }
 }
