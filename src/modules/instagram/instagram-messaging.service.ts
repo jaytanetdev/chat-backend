@@ -127,13 +127,13 @@ export class InstagramMessagingService {
     id: string;
     username?: string;
     name?: string;
-    profile_picture_url?: string;
+    profile_pic?: string;
   }> {
     const token = await this.getAccessToken(platformId);
     if (!token) throw new Error('Instagram not configured');
 
     const response = await this.client.get(`/${userId}`, {
-      params: { access_token: token, fields: 'id,username,name,profile_picture_url' },
+      params: { access_token: token, fields: 'id,username,name,profile_pic' },
     });
     return response.data;
   }

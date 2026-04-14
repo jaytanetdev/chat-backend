@@ -427,12 +427,14 @@ export class ChatService {
           displayName,
         );
 
-        if (avatarUrl && !customerIdentity.avatar_url) {
+        const fbNeedsName = displayName && customerIdentity.display_name !== displayName;
+        const fbNeedsAvatar = avatarUrl && customerIdentity.avatar_url !== avatarUrl;
+        if (fbNeedsName || fbNeedsAvatar) {
           try {
             customerIdentity = await this.customerIdentityService.updateProfile(
               customerIdentity.customer_identity_id,
-              displayName,
-              avatarUrl,
+              displayName ?? customerIdentity.display_name,
+              avatarUrl ?? customerIdentity.avatar_url,
             );
           } catch { /* non-critical */ }
         }
@@ -620,8 +622,8 @@ export class ChatService {
         let avatarUrl: string | undefined;
         try {
           const profile = await this.instagramMessagingService.getUserProfile(senderId, platform.platforms_id);
-          displayName = profile.username ?? profile.name;
-          avatarUrl = profile.profile_picture_url;
+          displayName = profile.name ?? profile.username;
+          avatarUrl = profile.profile_pic;
         } catch (err) {
           this.logger.warn(`Failed to fetch IG profile for ${senderId}: ${err.message}`);
         }
@@ -632,12 +634,14 @@ export class ChatService {
           displayName,
         );
 
-        if (avatarUrl && !customerIdentity.avatar_url) {
+        const needsNameUpdate = displayName && customerIdentity.display_name !== displayName;
+        const needsAvatarUpdate = avatarUrl && customerIdentity.avatar_url !== avatarUrl;
+        if (needsNameUpdate || needsAvatarUpdate) {
           try {
             customerIdentity = await this.customerIdentityService.updateProfile(
               customerIdentity.customer_identity_id,
-              displayName,
-              avatarUrl,
+              displayName ?? customerIdentity.display_name,
+              avatarUrl ?? customerIdentity.avatar_url,
             );
           } catch { /* non-critical */ }
         }
@@ -1018,8 +1022,8 @@ export class ChatService {
         const igConfigured = await this.instagramMessagingService.isConfiguredForPlatform(platform.platforms_id);
         if (!igConfigured) break;
         const igProfile = await this.instagramMessagingService.getUserProfile(externalUserId, platform.platforms_id);
-        displayName = igProfile.username ?? igProfile.name;
-        avatarUrl = igProfile.profile_picture_url;
+        displayName = igProfile.name ?? igProfile.username;
+        avatarUrl = igProfile.profile_pic;
         break;
       }
       default:
