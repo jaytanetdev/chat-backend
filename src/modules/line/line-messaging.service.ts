@@ -4,11 +4,13 @@ import axios, { AxiosInstance } from 'axios';
 import { CredentialService } from '../credential/credential.service';
 
 export interface LineMessage {
-  type: 'text' | 'image' | 'video' | 'audio' | 'file';
+  type: 'text' | 'image' | 'video' | 'audio' | 'file' | 'sticker';
   text?: string;
   originalContentUrl?: string;
   previewImageUrl?: string;
   duration?: number;
+  packageId?: string;
+  stickerId?: string;
   contentProvider?: {
     type: 'line' | 'external';
     originalContentUrl?: string;
@@ -156,6 +158,18 @@ export class LineMessagingService {
       type: 'image',
       originalContentUrl,
       previewImageUrl: previewImageUrl || originalContentUrl,
+    };
+    await this.sendPushMessage(platformId, userId, [message]);
+  }
+
+  /**
+   * Send sticker message
+   */
+  async sendStickerMessage(platformId: string, userId: string, packageId: string, stickerId: string): Promise<void> {
+    const message: LineMessage = {
+      type: 'sticker',
+      packageId,
+      stickerId,
     };
     await this.sendPushMessage(platformId, userId, [message]);
   }

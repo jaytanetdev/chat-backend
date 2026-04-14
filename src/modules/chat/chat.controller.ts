@@ -86,8 +86,7 @@ export class ChatController {
         dto.message_type || ChatMessageType.TEXT,
       );
     } catch (error) {
-      // Log error but still return the created chat
-      // The message is saved in DB even if platform send fails
+      this.logger.error(`Platform send failed for room ${dto.room_id}: ${error.message}`, error.stack);
     }
 
     // Emit new message via WebSocket for real-time updates
@@ -204,6 +203,53 @@ export class ChatController {
     this.chatEmitterService.emitRoomUpdated(roomId, {
       last_message_at: chat.create_at.toISOString(),
       last_message_text: messageText,
+    });
+
+    return chat;
+  }
+
+  @Post('send-sticker')
+  @ApiOperation({ summary: 'Send LINE sticker to room' })
+  @ApiResponse({ status: 201, description: 'Sticker sent' })
+  async sendSticker(
+    @Body() body: { room_id: string; package_id: string; sticker_id: string },
+    @CurrentUser() user: User,
+  ) {
+    const stickerUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${body.sticker_id}/android/sticker.png;compress=true`;
+    const metadata: Record<string, unknown> = {
+      stickerId: body.sticker_id,
+      packageId: body.package_id,
+      url: stickerUrl,
+    };
+
+    const chat = await this.chatService.create(
+      {
+        room_id: body.room_id,
+        message: '[สติกเกอร์]',
+        message_type: ChatMessageType.STICKER,
+        metadata,
+      },
+      user.user_id,
+      ChatDirection.OUT,
+    );
+
+    try {
+      await this.chatService.sendStickerToPlatform(body.room_id, body.package_id, body.sticker_id);
+    } catch (error) {
+      this.logger.error(`Platform sticker send failed: ${error.message}`, error.stack);
+    }
+
+    const payload = {
+      ...chat,
+      sender_name: user.username,
+      sender_type: ChatSenderType.ADMIN,
+    };
+    this.chatEmitterService.emitNewMessage(body.room_id, payload);
+
+    await this.roomService.updateLastMessage(body.room_id, chat.create_at, '[สติกเกอร์]');
+    this.chatEmitterService.emitRoomUpdated(body.room_id, {
+      last_message_at: chat.create_at.toISOString(),
+      last_message_text: '[สติกเกอร์]',
     });
 
     return chat;

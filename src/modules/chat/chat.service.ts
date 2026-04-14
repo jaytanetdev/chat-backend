@@ -410,6 +410,33 @@ export class ChatService {
   }
 
   /**
+   * Send sticker to platform (LINE)
+   */
+  async sendStickerToPlatform(roomId: string, packageId: string, stickerId: string): Promise<void> {
+    const room = await this.roomService.findOne(roomId);
+    if (!room) {
+      throw new AppException(ErrorCode.ROOM_NOT_FOUND, 'Room not found', HttpStatus.NOT_FOUND);
+    }
+    const platform = await this.platformService.findOne(room.platforms_id);
+    if (!room.customer_identity_id) {
+      throw new AppException(ErrorCode.CUSTOMER_IDENTITY_NOT_FOUND, 'Room has no customer identity', HttpStatus.NOT_FOUND);
+    }
+    const customer = await this.customerIdentityService.findOne(room.customer_identity_id);
+    if (!customer?.external_user_id) {
+      throw new AppException(ErrorCode.CUSTOMER_IDENTITY_NOT_FOUND, 'Customer identity not found', HttpStatus.NOT_FOUND);
+    }
+
+    if (platform.platform_type === PlatformType.LINE) {
+      const isConfigured = await this.lineMessagingService.isConfigured(platform.platforms_id);
+      if (isConfigured) {
+        await this.lineMessagingService.sendStickerMessage(
+          platform.platforms_id, customer.external_user_id, packageId, stickerId,
+        );
+      }
+    }
+  }
+
+  /**
    * Fetch LINE-hosted media content and upload to Cloudinary.
    * Runs in background — updates the chat metadata with the permanent Cloudinary URL.
    */
