@@ -40,6 +40,45 @@ export class RoomService {
     });
   }
 
+  async findPaginated(params: {
+    page?: number;
+    limit?: number;
+    platformType?: string;
+    search?: string;
+  }): Promise<{ items: Room[]; total: number; page: number; limit: number; hasMore: boolean }> {
+    const page = Math.max(1, params.page ?? 1);
+    const limit = Math.min(50, Math.max(1, params.limit ?? 20));
+
+    const qb = this.roomRepository
+      .createQueryBuilder('room')
+      .leftJoinAndSelect('room.platform', 'platform')
+      .leftJoinAndSelect('room.customer_identity', 'customer_identity')
+      .leftJoinAndSelect('room.assigned_user', 'assigned_user')
+      .leftJoinAndSelect('room.room_members', 'room_members')
+      .leftJoinAndSelect('room_members.user', 'user');
+
+    if (params.platformType) {
+      qb.andWhere('platform.platform_type = :platformType', { platformType: params.platformType });
+    }
+
+    if (params.search?.trim()) {
+      qb.andWhere(
+        '(customer_identity.display_name ILIKE :search OR customer_identity.external_user_id ILIKE :search)',
+        { search: `%${params.search.trim()}%` },
+      );
+    }
+
+    qb.orderBy('room.last_message_at', 'DESC', 'NULLS LAST');
+
+    const total = await qb.getCount();
+    const items = await qb
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getMany();
+
+    return { items, total, page, limit, hasMore: page * limit < total };
+  }
+
   async findOne(id: string): Promise<Room> {
     const room = await this.roomRepository.findOne({
       where: { room_id: id },

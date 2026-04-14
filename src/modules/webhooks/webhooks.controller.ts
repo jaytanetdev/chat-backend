@@ -171,29 +171,4 @@ export class WebhooksController {
     return { status: 'ok' };
   }
 
-  /**
-   * Shopee Webhook (if supported by Shopee)
-   * Currently Shopee uses polling instead of webhooks
-   */
-  @Public()
-  @Post('shopee')
-  @HttpCode(200)
-  @ApiOperation({ summary: 'Receive Shopee webhook events (if available)' })
-  handleShopeeWebhook(@Body() body: any): { status: string } {
-    this.logger.debug(`Received Shopee webhook: ${JSON.stringify(body)}`);
-    return { status: 'received' };
-  }
-
-  /**
-   * Lazada Webhook (if supported by Lazada)
-   * Currently Lazada uses polling instead of webhooks
-   */
-  @Public()
-  @Post('lazada')
-  @HttpCode(200)
-  @ApiOperation({ summary: 'Receive Lazada webhook events (if available)' })
-  handleLazadaWebhook(@Body() body: any): { status: string } {
-    this.logger.debug(`Received Lazada webhook: ${JSON.stringify(body)}`);
-    return { status: 'received' };
-  }
 }

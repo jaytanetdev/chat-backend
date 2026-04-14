@@ -33,12 +33,27 @@ export class RoomController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List all rooms or by platform' })
+  @ApiOperation({ summary: 'List rooms with pagination, search, and platform filter' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'platformType', required: false })
+  @ApiQuery({ name: 'search', required: false })
   @ApiQuery({ name: 'platformId', required: false })
-  @ApiResponse({ status: 200, description: 'List of rooms' })
-  findAll(@Query('platformId') platformId?: string) {
+  @ApiResponse({ status: 200, description: 'Paginated list of rooms' })
+  findAll(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('platformType') platformType?: string,
+    @Query('search') search?: string,
+    @Query('platformId') platformId?: string,
+  ) {
     if (platformId) return this.roomService.findByPlatform(platformId);
-    return this.roomService.findAll();
+    return this.roomService.findPaginated({
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 20,
+      platformType,
+      search,
+    });
   }
 
   @Get(':id')
