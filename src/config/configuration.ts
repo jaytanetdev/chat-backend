@@ -26,6 +26,8 @@ export default () => ({
       verifyToken: process.env['FB_VERIFY_TOKEN'],
     },
     instagram: {
+      appSecret: process.env['IG_APP_SECRET'],
+      pageAccessToken: process.env['IG_PAGE_ACCESS_TOKEN'],
       verifyToken: process.env['IG_VERIFY_TOKEN'],
     },
   },

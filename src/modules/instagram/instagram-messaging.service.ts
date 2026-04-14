@@ -1,29 +1,35 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { CredentialService } from '../credential/credential.service';
+
+export interface InstagramMessage {
+  text?: string;
+  attachment?: {
+    type: 'image' | 'video' | 'audio' | 'file';
+    payload: {
+      url?: string;
+      is_reusable?: boolean;
+    };
+  };
+}
 
 @Injectable()
 export class InstagramMessagingService {
   private readonly logger = new Logger(InstagramMessagingService.name);
   private readonly client: AxiosInstance;
-  private readonly pageAccessToken: string | undefined;
-  private readonly apiVersion = 'v18.0';
+  private readonly apiVersion = 'v25.0';
+  private readonly fallbackPageAccessToken: string | undefined;
 
-  constructor(private readonly configService: ConfigService) {
-    this.pageAccessToken = this.configService.get<string>('platforms.facebook.pageAccessToken');
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly credentialService: CredentialService,
+  ) {
+    this.fallbackPageAccessToken = this.configService.get<string>('platforms.instagram.pageAccessToken');
 
     this.client = axios.create({
       baseURL: `https://graph.facebook.com/${this.apiVersion}`,
       timeout: 30000,
-    });
-
-    this.client.interceptors.request.use((config) => {
-      const token = this.configService.get<string>('platforms.facebook.pageAccessToken');
-      if (token) {
-        config.params = config.params || {};
-        config.params.access_token = token;
-      }
-      return config;
     });
 
     this.client.interceptors.response.use(
@@ -37,59 +43,107 @@ export class InstagramMessagingService {
     );
   }
 
-  isConfigured(): boolean {
-    return !!this.pageAccessToken;
+  private async getAccessToken(platformId?: string): Promise<string | null> {
+    if (platformId) {
+      try {
+        const token = await this.credentialService.getAccessTokenByPlatform(platformId);
+        if (token) return token;
+      } catch (error) {
+        this.logger.warn(`Failed to get IG token from DB for platform ${platformId}: ${error.message}`);
+      }
+    }
+    return this.fallbackPageAccessToken ?? null;
   }
 
-  /**
-   * Send message to Instagram user
-   * https://developers.facebook.com/docs/instagram-api/reference/ig-user/messages
-   */
-  async sendMessage(recipientId: string, message: { text?: string; attachment?: any }): Promise<void> {
-    if (!this.isConfigured()) {
-      this.logger.warn('Instagram not configured, cannot send message');
-      throw new Error('Instagram not configured');
-    }
+  isConfigured(): boolean {
+    return !!this.fallbackPageAccessToken;
+  }
 
-    const igUserId = this.configService.get<string>('INSTAGRAM_IG_USER_ID');
-    if (!igUserId) {
-      throw new Error('Instagram IG User ID not configured');
+  async isConfiguredForPlatform(platformId: string): Promise<boolean> {
+    const token = await this.getAccessToken(platformId);
+    return !!token;
+  }
+
+  async sendMessage(
+    recipientId: string,
+    message: InstagramMessage,
+    platformId?: string,
+  ): Promise<{ recipient_id: string; message_id: string }> {
+    const token = await this.getAccessToken(platformId);
+    if (!token) {
+      throw new Error('Instagram not configured');
     }
 
     const payload = {
       recipient: { id: recipientId },
       message,
+      messaging_type: 'RESPONSE',
     };
 
-    try {
-      await this.client.post(`/${igUserId}/messages`, payload);
-      this.logger.debug(`Instagram message sent to ${recipientId}`);
-    } catch (error) {
-      this.logger.error(`Failed to send Instagram message: ${error.message}`);
-      throw error;
-    }
+    const response = await this.client.post('/me/messages', payload, {
+      params: { access_token: token },
+    });
+    this.logger.debug(`Instagram message sent: ${response.data.message_id}`);
+    return response.data;
   }
 
-  async sendTextMessage(recipientId: string, text: string): Promise<void> {
-    await this.sendMessage(recipientId, { text: text.slice(0, 2000) });
+  async sendTextMessage(recipientId: string, text: string, platformId?: string): Promise<void> {
+    await this.sendMessage(recipientId, { text: text.slice(0, 1000) }, platformId);
   }
 
-  /**
-   * Get user profile
-   */
-  async getUserProfile(userId: string): Promise<any> {
-    if (!this.isConfigured()) {
-      throw new Error('Instagram not configured');
-    }
+  async sendImageMessage(recipientId: string, imageUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'image', payload: { url: imageUrl, is_reusable: true } } },
+      platformId,
+    );
+  }
 
-    try {
-      const response = await this.client.get(`/${userId}`, {
-        params: { fields: 'id,username,profile_picture_url' },
-      });
-      return response.data;
-    } catch (error) {
-      this.logger.error(`Failed to get Instagram user profile: ${error.message}`);
-      throw error;
-    }
+  async sendVideoMessage(recipientId: string, videoUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'video', payload: { url: videoUrl, is_reusable: true } } },
+      platformId,
+    );
+  }
+
+  async sendAudioMessage(recipientId: string, audioUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'audio', payload: { url: audioUrl, is_reusable: true } } },
+      platformId,
+    );
+  }
+
+  async sendFileMessage(recipientId: string, fileUrl: string, platformId?: string): Promise<void> {
+    await this.sendMessage(
+      recipientId,
+      { attachment: { type: 'file', payload: { url: fileUrl, is_reusable: true } } },
+      platformId,
+    );
+  }
+
+  async getUserProfile(userId: string, platformId?: string): Promise<{
+    id: string;
+    username?: string;
+    name?: string;
+    profile_picture_url?: string;
+  }> {
+    const token = await this.getAccessToken(platformId);
+    if (!token) throw new Error('Instagram not configured');
+
+    const response = await this.client.get(`/${userId}`, {
+      params: { access_token: token, fields: 'id,username,name,profile_picture_url' },
+    });
+    return response.data;
+  }
+
+  validateSignature(body: string, signature: string, appSecret: string): boolean {
+    const crypto = require('crypto');
+    const expected = crypto
+      .createHmac('sha256', appSecret)
+      .update(body, 'utf8')
+      .digest('hex');
+    return signature === `sha256=${expected}`;
   }
 }

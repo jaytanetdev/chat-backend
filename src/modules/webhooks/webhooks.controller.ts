@@ -142,29 +142,28 @@ export class WebhooksController {
   @Post('instagram')
   @HttpCode(200)
   @ApiOperation({ summary: 'Receive Instagram webhook events' })
-  async handleInstagramWebhook(
+  handleInstagramWebhook(
     @Req() req: Request,
     @Headers('x-hub-signature-256') signature: string,
     @Body() body: any,
-  ): Promise<{ status: string; processed: number }> {
-    this.logger.debug(`Received Instagram webhook: ${JSON.stringify(body)}`);
+  ): { status: string } {
+    this.logger.debug(`Received Instagram webhook: ${JSON.stringify(body).substring(0, 500)}`);
 
-    // Instagram uses same signature verification as Facebook
     if (signature) {
       const isValid = this.facebookWebhookService.verifySignature(JSON.stringify(req.body), signature);
       if (!isValid) {
         this.logger.warn('Invalid Instagram webhook signature');
-        return { status: 'error', processed: 0 };
+        return { status: 'ok' };
       }
     }
 
-    // Process webhook
-    const result = await this.instagramWebhookService.processWebhook(body);
+    if (body.object === 'instagram' && body.entry) {
+      this.chatService.processInboundInstagram(body).catch((err) =>
+        this.logger.error(`Error processing Instagram webhook: ${err.message}`, err.stack),
+      );
+    }
 
-    return {
-      status: 'success',
-      processed: result.processed,
-    };
+    return { status: 'ok' };
   }
 
   /**

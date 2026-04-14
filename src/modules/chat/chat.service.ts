@@ -535,6 +535,183 @@ export class ChatService {
   }
 
   /**
+   * Process inbound Instagram webhook (same Meta format, object === 'instagram')
+   */
+  async processInboundInstagram(body: {
+    object: string;
+    entry: Array<{
+      id: string;
+      time: number;
+      messaging: Array<{
+        sender: { id: string };
+        recipient: { id: string };
+        timestamp: number;
+        message?: {
+          mid: string;
+          text?: string;
+          attachments?: Array<{ type: string; payload: { url?: string } }>;
+        };
+      }>;
+    }>;
+  }): Promise<void> {
+    for (const entry of body.entry) {
+      const igAccountId = entry.id;
+
+      const platform = await this.platformService.findOneByExternalAccountId(igAccountId);
+      if (!platform) {
+        this.logger.warn(`No platform found for Instagram account ID: ${igAccountId}`);
+        continue;
+      }
+
+      for (const event of entry.messaging ?? []) {
+        if (!event.message) continue;
+
+        const senderId = event.sender.id;
+        if (senderId === igAccountId) continue;
+
+        const msg = event.message;
+        const externalMessageId = msg.mid;
+
+        let messageType = ChatMessageType.TEXT;
+        let messageText = msg.text ?? '';
+        const metadata: Record<string, unknown> = {};
+
+        if (msg.attachments && msg.attachments.length > 0) {
+          const att = msg.attachments[0];
+          const attUrl = att.payload?.url;
+
+          switch (att.type) {
+            case 'image':
+              messageType = ChatMessageType.IMAGE;
+              messageText = '[รูปภาพ]';
+              if (attUrl) { metadata.url = attUrl; metadata.previewUrl = attUrl; }
+              break;
+            case 'video':
+              messageType = ChatMessageType.VIDEO;
+              messageText = '[วิดีโอ]';
+              if (attUrl) { metadata.url = attUrl; metadata.previewUrl = attUrl; }
+              break;
+            case 'audio':
+              messageType = ChatMessageType.AUDIO;
+              messageText = '[เสียง]';
+              if (attUrl) { metadata.url = attUrl; }
+              break;
+            case 'share':
+              messageText = '[แชร์]';
+              if (attUrl) { metadata.url = attUrl; }
+              break;
+            case 'story_mention':
+              messageText = '[เมนชันสตอรี่]';
+              if (attUrl) { metadata.url = attUrl; }
+              break;
+            default:
+              if (attUrl) { metadata.url = attUrl; }
+          }
+
+          if (msg.attachments.length > 1) {
+            metadata.allAttachments = msg.attachments.map((a) => ({
+              type: a.type,
+              url: a.payload?.url,
+            }));
+          }
+        }
+
+        let displayName: string | undefined;
+        let avatarUrl: string | undefined;
+        try {
+          const profile = await this.instagramMessagingService.getUserProfile(senderId, platform.platforms_id);
+          displayName = profile.username ?? profile.name;
+          avatarUrl = profile.profile_picture_url;
+        } catch (err) {
+          this.logger.warn(`Failed to fetch IG profile for ${senderId}: ${err.message}`);
+        }
+
+        let customerIdentity = await this.customerIdentityService.findOrCreate(
+          platform.platforms_id,
+          senderId,
+          displayName,
+        );
+
+        if (avatarUrl && !customerIdentity.avatar_url) {
+          try {
+            customerIdentity = await this.customerIdentityService.updateProfile(
+              customerIdentity.customer_identity_id,
+              displayName,
+              avatarUrl,
+            );
+          } catch { /* non-critical */ }
+        }
+
+        let room = await this.roomService.findOneByPlatformAndCustomer(
+          platform.platforms_id,
+          customerIdentity.customer_identity_id,
+        );
+        if (!room) {
+          room = await this.roomService.create({
+            platforms_id: platform.platforms_id,
+            customer_identity_id: customerIdentity.customer_identity_id,
+            status: RoomStatus.ACTIVE,
+          });
+        }
+
+        const userPlatforms = await this.userPlatformService.findByPlatform(platform.platforms_id);
+        for (const up of userPlatforms) {
+          await this.roomService.addMemberIfNotExists(room.room_id, up.user_id);
+        }
+
+        const existingChat = externalMessageId
+          ? await this.chatRepository.findOne({
+              where: { room_id: room.room_id, external_message_id: externalMessageId },
+            })
+          : null;
+
+        let chat: Chat;
+        if (existingChat) {
+          existingChat.message = messageText;
+          existingChat.message_type = messageType;
+          if (Object.keys(metadata).length) existingChat.metadata = metadata;
+          chat = await this.chatRepository.save(existingChat);
+        } else {
+          chat = this.chatRepository.create({
+            room_id: room.room_id,
+            sender_type: ChatSenderType.CUSTOMER,
+            sender_id: customerIdentity.customer_identity_id,
+            direction: ChatDirection.IN,
+            external_message_id: externalMessageId ?? null,
+            message: messageText,
+            message_type: messageType,
+            metadata: Object.keys(metadata).length ? metadata : null,
+            is_read: false,
+          });
+          chat = await this.chatRepository.save(chat);
+        }
+
+        await this.roomService.incrementUnread(room.room_id, messageText, chat.create_at);
+
+        this.chatEmitterService.emitNewMessage(room.room_id, {
+          ...chat,
+          sender_name: customerIdentity.display_name ?? customerIdentity.external_user_id,
+        });
+        this.chatEmitterService.emitRoomUpdated(room.room_id, {
+          unread_count: (room.unread_count ?? 0) + 1,
+          last_message_at: chat.create_at instanceof Date ? chat.create_at.toISOString() : String(chat.create_at),
+          last_message_text: messageText,
+        });
+
+        if (messageType === ChatMessageType.IMAGE && metadata.url && this.cloudinaryService.isConfigured()) {
+          this.uploadFacebookMediaToCloudinary(
+            chat.chat_id, room.room_id, metadata.url as string,
+            'image', customerIdentity.display_name ?? senderId,
+            customerIdentity.customer_identity_id,
+          ).catch((err) => this.logger.warn(`IG Cloudinary upload failed: ${err.message}`));
+        }
+
+        this.logger.debug(`Instagram inbound processed: room=${room.room_id}, type=${messageType}`);
+      }
+    }
+  }
+
+  /**
    * Send message to platform (LINE, Facebook, Instagram)
    * Called when admin sends a message from the chat UI
    */
@@ -579,13 +756,16 @@ export class ChatService {
           break;
         }
 
-        case PlatformType.INSTAGRAM:
-          if (this.instagramMessagingService.isConfigured()) {
-            await this.instagramMessagingService.sendTextMessage(externalUserId, content);
+        case PlatformType.INSTAGRAM: {
+          const igConfigured = await this.instagramMessagingService.isConfiguredForPlatform(platform.platforms_id);
+          if (igConfigured) {
+            await this.instagramMessagingService.sendTextMessage(externalUserId, content, platform.platforms_id);
+            this.logger.debug('Instagram message sent successfully');
           } else {
             this.logger.warn('Instagram not configured, message not sent');
           }
           break;
+        }
 
         default:
           this.logger.warn(`Platform ${platform.platform_type} not yet implemented for outbound messaging`);
@@ -630,6 +810,13 @@ export class ChatService {
         }
         break;
       }
+      case PlatformType.INSTAGRAM: {
+        const igConfigured = await this.instagramMessagingService.isConfiguredForPlatform(platform.platforms_id);
+        if (igConfigured) {
+          await this.instagramMessagingService.sendImageMessage(customer.external_user_id, imageUrl, platform.platforms_id);
+        }
+        break;
+      }
     }
   }
 
@@ -657,12 +844,15 @@ export class ChatService {
           platform.platforms_id, customer.external_user_id, packageId, stickerId,
         );
       }
-    } else if (platform.platform_type === PlatformType.FACEBOOK) {
-      const isConfigured = await this.facebookMessagingService.isConfiguredForPlatform(platform.platforms_id);
+    } else if (platform.platform_type === PlatformType.FACEBOOK || platform.platform_type === PlatformType.INSTAGRAM) {
+      const service = platform.platform_type === PlatformType.FACEBOOK
+        ? this.facebookMessagingService
+        : this.instagramMessagingService;
+      const isConfigured = await service.isConfiguredForPlatform(platform.platforms_id);
       if (isConfigured) {
         const emoji = this.codePointToEmoji(stickerId);
         if (emoji) {
-          await this.facebookMessagingService.sendTextMessage(
+          await service.sendTextMessage(
             customer.external_user_id, emoji, platform.platforms_id,
           );
         }
@@ -822,6 +1012,14 @@ export class ChatService {
         const fbProfile = await this.facebookMessagingService.getUserProfile(externalUserId, platform.platforms_id);
         displayName = fbProfile.name;
         avatarUrl = fbProfile.profile_pic;
+        break;
+      }
+      case PlatformType.INSTAGRAM: {
+        const igConfigured = await this.instagramMessagingService.isConfiguredForPlatform(platform.platforms_id);
+        if (!igConfigured) break;
+        const igProfile = await this.instagramMessagingService.getUserProfile(externalUserId, platform.platforms_id);
+        displayName = igProfile.username ?? igProfile.name;
+        avatarUrl = igProfile.profile_picture_url;
         break;
       }
       default:
