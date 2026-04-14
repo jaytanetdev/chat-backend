@@ -7,6 +7,7 @@ import {
   Query,
   Res,
   UseGuards,
+  HttpCode,
   HttpStatus,
   Logger,
 } from '@nestjs/common';
@@ -101,12 +102,19 @@ export class ChatController {
 
   @Post('webhook/inbound')
   @Public()
+  @HttpCode(200)
   @ApiOperation({ summary: 'Inbound webhook (LINE etc.): platform → customer → room → chat in one call' })
-  @ApiResponse({ status: 201, description: 'Chat created/updated' })
+  @ApiResponse({ status: 200, description: 'Chat created/updated' })
   @ApiResponse({ status: 400, description: 'Invalid payload or platform not found' })
   processInbound(@Body() body: any) {
-    this.logger.debug(`Inbound webhook: ${JSON.stringify(body).substring(0, 500)}`);
-    return this.chatService.processInboundWebhook(body);
+    if (!body?.destination || !body?.events) {
+      this.logger.warn(`Inbound webhook called with invalid body: ${JSON.stringify(body ?? null).substring(0, 200)}`);
+      return { status: 'ok' };
+    }
+    this.chatService.processInboundWebhook(body).catch((err) =>
+      this.logger.error(`Error in inbound webhook: ${err.message}`, err.stack),
+    );
+    return { status: 'ok' };
   }
 
   @Get('room/:roomId')
