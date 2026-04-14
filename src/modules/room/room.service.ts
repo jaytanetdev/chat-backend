@@ -105,9 +105,9 @@ export class RoomService {
     await this.roomMemberRepository.remove(member);
   }
 
-  async incrementUnread(roomId: string, messageText?: string): Promise<void> {
+  async incrementUnread(roomId: string, messageText?: string, timestamp?: Date): Promise<void> {
     await this.roomRepository.increment({ room_id: roomId }, 'unread_count', 1);
-    const update: Record<string, unknown> = { last_message_at: new Date() };
+    const update: Record<string, unknown> = { last_message_at: timestamp ?? new Date() };
     if (messageText !== undefined) {
       update.last_message_text = messageText.length > 100 ? messageText.substring(0, 100) + '...' : messageText;
     }

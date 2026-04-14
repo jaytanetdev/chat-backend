@@ -185,7 +185,7 @@ export class ChatService {
       chat = await this.chatRepository.save(chat);
     }
 
-    await this.roomService.incrementUnread(room.room_id, messageText);
+    await this.roomService.incrementUnread(room.room_id, messageText, chat.create_at);
 
     this.chatEmitterService.emitNewMessage(room.room_id, {
       ...chat,
@@ -193,7 +193,7 @@ export class ChatService {
     });
     this.chatEmitterService.emitRoomUpdated(room.room_id, {
       unread_count: (room.unread_count ?? 0) + 1,
-      last_message_at: new Date().toISOString(),
+      last_message_at: chat.create_at instanceof Date ? chat.create_at.toISOString() : String(chat.create_at),
       last_message_text: messageText,
     });
 
@@ -481,7 +481,7 @@ export class ChatService {
           chat = await this.chatRepository.save(chat);
         }
 
-        await this.roomService.incrementUnread(room.room_id, messageText);
+        await this.roomService.incrementUnread(room.room_id, messageText, chat.create_at);
 
         this.chatEmitterService.emitNewMessage(room.room_id, {
           ...chat,
@@ -489,7 +489,7 @@ export class ChatService {
         });
         this.chatEmitterService.emitRoomUpdated(room.room_id, {
           unread_count: (room.unread_count ?? 0) + 1,
-          last_message_at: new Date().toISOString(),
+          last_message_at: chat.create_at instanceof Date ? chat.create_at.toISOString() : String(chat.create_at),
           last_message_text: messageText,
         });
 
