@@ -117,6 +117,11 @@ export class WebhooksController {
       this.chatService.processInboundFacebook(body).catch((err) =>
         this.logger.error(`Error processing Facebook webhook: ${err.message}`, err.stack),
       );
+    } else if (body.object === 'instagram' && body.entry) {
+      this.logger.debug('Instagram event received on Facebook endpoint, routing to IG handler');
+      this.chatService.processInboundInstagram(body).catch((err) =>
+        this.logger.error(`Error processing Instagram webhook: ${err.message}`, err.stack),
+      );
     }
 
     return { status: 'ok' };

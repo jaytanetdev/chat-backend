@@ -621,12 +621,16 @@ export class ChatService {
         let displayName: string | undefined;
         let avatarUrl: string | undefined;
         try {
+          this.logger.debug(`Fetching IG profile for sender: ${senderId}, platform: ${platform.platforms_id}`);
           const profile = await this.instagramMessagingService.getUserProfile(senderId, platform.platforms_id);
+          this.logger.debug(`IG profile result: ${JSON.stringify(profile)}`);
           displayName = profile.name ?? profile.username;
           avatarUrl = profile.profile_pic;
         } catch (err) {
-          this.logger.warn(`Failed to fetch IG profile for ${senderId}: ${err.message}`);
+          this.logger.error(`Failed to fetch IG profile for ${senderId}: ${err.message}`, err.stack);
         }
+
+        this.logger.debug(`IG customer data: name=${displayName}, avatar=${avatarUrl ? 'YES' : 'NO'}`);
 
         let customerIdentity = await this.customerIdentityService.findOrCreate(
           platform.platforms_id,
@@ -634,16 +638,17 @@ export class ChatService {
           displayName,
         );
 
-        const needsNameUpdate = displayName && customerIdentity.display_name !== displayName;
-        const needsAvatarUpdate = avatarUrl && customerIdentity.avatar_url !== avatarUrl;
-        if (needsNameUpdate || needsAvatarUpdate) {
+        if (displayName || avatarUrl) {
           try {
             customerIdentity = await this.customerIdentityService.updateProfile(
               customerIdentity.customer_identity_id,
               displayName ?? customerIdentity.display_name,
               avatarUrl ?? customerIdentity.avatar_url,
             );
-          } catch { /* non-critical */ }
+            this.logger.debug(`IG customer updated: name=${customerIdentity.display_name}, avatar=${customerIdentity.avatar_url ? 'YES' : 'NO'}`);
+          } catch (err) {
+            this.logger.error(`Failed to update IG customer profile: ${err.message}`);
+          }
         }
 
         let room = await this.roomService.findOneByPlatformAndCustomer(
