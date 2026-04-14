@@ -5,6 +5,7 @@ import { LineWebhookService } from '../line/line-webhook.service';
 import { FacebookWebhookService } from '../facebook/facebook-webhook.service';
 import { InstagramWebhookService } from '../instagram/instagram-webhook.service';
 import { LineMessagingService } from '../line/line-messaging.service';
+import { ChatService } from '../chat/chat.service';
 import { Public } from '../../modules/auth/decorators/public.decorator';
 
 @ApiTags('Webhooks')
@@ -17,41 +18,64 @@ export class WebhooksController {
     private readonly lineMessagingService: LineMessagingService,
     private readonly facebookWebhookService: FacebookWebhookService,
     private readonly instagramWebhookService: InstagramWebhookService,
+    private readonly chatService: ChatService,
   ) {}
 
   /**
-   * LINE Webhook
-   * https://developers.line.biz/en/reference/messaging-api/#request-headers
+   * LINE Webhook — always returns 200 immediately, processes async.
+   * LINE retries if it doesn't get 200 within 1 second.
    */
   @Public()
   @Post('line')
   @HttpCode(200)
   @ApiOperation({ summary: 'Receive LINE webhook events' })
-  @ApiResponse({ status: 200, description: 'Events processed successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid signature or payload' })
-  async handleLineWebhook(
+  @ApiResponse({ status: 200, description: 'Accepted' })
+  handleLineWebhook(
     @Req() req: Request,
     @Headers('x-line-signature') signature: string,
     @Body() body: any,
-  ): Promise<{ status: string; processed: number }> {
-    this.logger.debug(`Received LINE webhook: ${JSON.stringify(body)}`);
-
-    // Verify signature
+  ): { status: string } {
+    // Signature verification (sync — fast)
     if (signature) {
       const isValid = this.lineWebhookService.verifySignature(JSON.stringify(req.body), signature);
       if (!isValid) {
         this.logger.warn('Invalid LINE webhook signature');
-        return { status: 'error', processed: 0 };
+        return { status: 'ok' };
       }
     }
 
-    // Process webhook
-    const result = await this.lineWebhookService.processWebhook(body);
+    // Fire-and-forget: process events in background
+    this.processLineEventsAsync(body).catch((err) =>
+      this.logger.error(`Unhandled error in LINE webhook processing: ${err.message}`, err.stack),
+    );
 
-    return {
-      status: 'success',
-      processed: result.processed,
-    };
+    return { status: 'ok' };
+  }
+
+  private async processLineEventsAsync(body: any): Promise<void> {
+    const events = body.events ?? [];
+    if (events.length === 0) return;
+
+    this.logger.debug(`Processing ${events.length} LINE event(s) for destination ${body.destination}`);
+
+    for (const event of events) {
+      if (event.type === 'message' && event.source?.userId && event.message) {
+        try {
+          await this.chatService.processInboundWebhook({
+            destination: body.destination,
+            events: [event],
+          });
+        } catch (error) {
+          this.logger.error(`Error processing LINE message event: ${error.message}`, error.stack);
+        }
+      } else {
+        try {
+          await this.lineWebhookService.processWebhook({ ...body, events: [event] });
+        } catch (error) {
+          this.logger.error(`Error processing LINE ${event.type} event: ${error.message}`);
+        }
+      }
+    }
   }
 
   /**

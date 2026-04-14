@@ -155,7 +155,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       sender_type: ChatSenderType.ADMIN,
     };
 
-    this.server.to(`room:${data.room_id}`).emit('new_message', payload);
+    this.chatEmitterService.emitNewMessage(data.room_id, payload);
 
     return { event: 'message_sent', chat_id: chat.chat_id };
   }

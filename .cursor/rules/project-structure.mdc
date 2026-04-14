@@ -1,0 +1,155 @@
+---
+description: Complete project architecture for chat-backend (NestJS) and chat-frontend (Next.js). Auto-applied so every agent session understands the full codebase.
+alwaysApply: true
+---
+
+# Project Architecture — Omni-channel Chat System
+
+## Tech Stack
+
+| Layer | Backend | Frontend |
+|-------|---------|----------|
+| Framework | NestJS 11 | Next.js 16 (App Router) |
+| Language | TypeScript 5.7 | TypeScript 5 |
+| Database | PostgreSQL + TypeORM 0.3 | — |
+| Auth | JWT (passport-jwt, bcrypt) | Zustand persist + axios interceptor |
+| Realtime | Socket.IO (namespace `/chat`) | socket.io-client |
+| Validation | class-validator / class-transformer | zod + react-hook-form |
+| HTTP Client | axios (for LINE/FB/IG/Shopee/Lazada APIs) | axios |
+| State | — | Zustand (auth, chat stores) + TanStack React Query v5 |
+| UI | Swagger at `/api` | Tailwind CSS v4, lucide-react icons |
+
+## Backend Directory Layout (`chat-backend/`)
+
+```
+src/
+  main.ts                         # Bootstrap, CORS, Swagger, ValidationPipe, GlobalExceptionFilter
+  app.module.ts                   # Root module, imports all feature modules
+  app.controller.ts / .service.ts
+  data-source.ts                  # TypeORM CLI datasource (migrations)
+  config/
+    configuration.ts              # Env mapping → structured config keys
+  common/
+    errors/                       # AppException, ErrorCode enum
+    filters/                      # GlobalExceptionFilter (HTTP)
+  entities/
+    index.ts                      # Re-exports all entities + enums
+    shop.entity.ts                # Shop (shop_id, shop_name)
+    platform.entity.ts            # Platform (platform_type enum: LINE|FACEBOOK|INSTAGRAM|SHOPEE|LAZADA)
+    credential.entity.ts          # Credential (tokens per platform)
+    customer-identity.entity.ts   # CustomerIdentity (external_user_id, display_name, avatar_url)
+    user.entity.ts                # User (username, password, role: USER|ADMIN)
+    user-platform.entity.ts       # UserPlatform (assigns user to platform)
+    room.entity.ts                # Room (customer_identity + platform, unread_count, status)
+    room-member.entity.ts         # RoomMember (user in room, role: PRIMARY|SECONDARY|OBSERVER)
+    chat.entity.ts                # Chat (message, direction IN/OUT, sender_type, message_type, metadata JSONB)
+    chat-read-receipt.entity.ts   # ChatReadReceipt (user read tracking)
+  migrations/                     # TypeORM migrations (timestamp-prefixed)
+  modules/
+    auth/        → AuthController, AuthService, JwtStrategy, JwtAuthGuard, RolesGuard
+    shop/        → CRUD for shops
+    platform/    → CRUD for platforms
+    credential/  → CRUD for credentials (tokens)
+    user/        → CRUD for users
+    user-platform/ → assign users to platforms
+    room/        → CRUD for rooms + members
+    customer-identity/ → CRUD + findOrCreate
+    chat/        → ChatController, ChatService, ChatGateway, ChatEmitterService
+    line/        → LineMessagingService (push/reply/profile), LineWebhookService
+    facebook/    → FacebookMessagingService, FacebookWebhookService
+    instagram/   → InstagramMessagingService, InstagramWebhookService
+    shopee/      → ShopeeMessagingService, ShopeePollingService (stub)
+    lazada/      → LazadaMessagingService, LazadaPollingService (stub)
+    webhooks/    → WebhooksController (LINE/FB/IG/Shopee/Lazada webhook endpoints)
+```
+
+## Frontend Directory Layout (`chat-frontend/`)
+
+```
+app/
+  layout.tsx          # Root layout (Thai font, QueryProvider)
+  page.tsx            # Redirect → /chat
+  globals.css         # Tailwind v4 theme
+  login/page.tsx      # Login page (react-hook-form + zod)
+  chat/
+    layout.tsx        # AuthProvider + Sidebar + useSocket init
+    page.tsx          # Empty state "select a room"
+    [roomId]/page.tsx # ChatWindow for selected room
+components/
+  chat/               # ChatBubble, ChatInput, ChatWindow, RoomItem, Sidebar, TypingIndicator
+  layout/             # AdminProfile
+  ui/                 # Avatar, Badge, Button, Input, PlatformIcon, Spinner
+hooks/
+  useAuth.ts          # useLogin, useLogout, useShops
+  useMessages.ts      # useInfiniteQuery for chat messages
+  useRooms.ts         # useQuery for room list
+  useSocket.ts        # Socket.IO hook (join/leave room, typing, mark read)
+lib/
+  axios.ts            # Axios instance with auth interceptor + retry
+  socket.ts           # Socket.IO singleton (namespace /chat)
+  cn.ts               # clsx + tailwind-merge
+  error-codes.ts      # Error code → Thai message mapping
+providers/
+  AuthProvider.tsx     # Route guard (redirect to /login if no token)
+  QueryProvider.tsx    # TanStack QueryClient
+stores/
+  auth.store.ts       # Zustand persist: token, userId, role, activeShopId
+  chat.store.ts       # Zustand: activeRoomId, platformFilter, typingUsers
+schemas/
+  auth.schema.ts      # Zod login schema
+  chat.schema.ts      # Zod send message schema
+types/
+  api.ts              # TypeScript interfaces (Room, Chat, Platform, etc.)
+```
+
+## Key Entity Relationships
+
+```
+Shop 1──N Platform 1──N Credential
+                    1──N CustomerIdentity 1──N Room 1──N Chat 1──N ChatReadReceipt
+                    1──N UserPlatform N──1 User 1──N RoomMember N──1 Room
+```
+
+## Core API Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | /auth/login | Public | JWT login |
+| POST | /chats/webhook/inbound | Public | Inbound message pipeline (LINE-shaped payload) |
+| POST | /chats/send | JWT | Admin sends message → DB + platform + WebSocket |
+| GET | /chats/room/:roomId/detailed | JWT | Paginated messages with sender names |
+| GET | /rooms | Open | List rooms (optional platformId filter) |
+| POST | /webhooks/line | Public | LINE webhook receiver |
+| POST | /webhooks/facebook | Public | Facebook webhook |
+| POST | /webhooks/instagram | Public | Instagram webhook |
+
+## WebSocket Events (namespace: `/chat`)
+
+| Direction | Event | Payload |
+|-----------|-------|---------|
+| Client→Server | join_room | { roomId } |
+| Client→Server | leave_room | { roomId } |
+| Client→Server | send_message | { roomId, message, messageType } |
+| Client→Server | typing | { roomId, isTyping } |
+| Client→Server | mark_read | { roomId } |
+| Server→Client | new_message | Chat object |
+| Server→Client | typing | { roomId, userId, username, isTyping } |
+| Server→Client | messages_read | { roomId, userId } |
+| Server→Client | room_updated | { roomId, ...partial room data } |
+
+## Inbound Message Flow
+
+```
+External Platform → POST /chats/webhook/inbound (or /webhooks/line)
+  → Find Platform by destination (external_account_id)
+  → FindOrCreate CustomerIdentity
+  → FindOrCreate Room
+  → Add RoomMembers (from UserPlatform)
+  → Upsert Chat record
+  → Emit via ChatEmitterService (new_message + room_updated)
+```
+
+## Environment Config Keys (configuration.ts)
+
+`port`, `nodeEnv`, `database.*`, `jwt.secret`, `jwt.expiresIn`, `cors.origin`,
+`platforms.line.*`, `platforms.facebook.*`, `platforms.instagram.*`, `shopee.*`, `lazada.*`

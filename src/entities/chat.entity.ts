@@ -29,6 +29,7 @@ export enum ChatMessageType {
   VIDEO = 'VIDEO',
   AUDIO = 'AUDIO',
   FILE = 'FILE',
+  STICKER = 'STICKER',
 }
 
 @Entity('chat')

@@ -5,8 +5,12 @@ import {
   Body,
   Param,
   Query,
+  Res,
   UseGuards,
+  HttpStatus,
+  Logger,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ChatService } from './chat.service';
 import { CreateChatDto } from './dto/create-chat.dto';
@@ -20,6 +24,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { Chat, ChatDirection, ChatMessageType, ChatSenderType, User, UserRole } from '../../entities';
 import { ChatEmitterService } from './chat-emitter.service';
 import { RoomService } from '../room/room.service';
+import { LineMessagingService } from '../line/line-messaging.service';
 
 @ApiTags('Chat')
 @ApiBearerAuth()
@@ -27,10 +32,13 @@ import { RoomService } from '../room/room.service';
 @Roles(UserRole.ADMIN)
 @Controller('chats')
 export class ChatController {
+  private readonly logger = new Logger(ChatController.name);
+
   constructor(
     private readonly chatService: ChatService,
     private readonly chatEmitterService: ChatEmitterService,
     private readonly roomService: RoomService,
+    private readonly lineMessagingService: LineMessagingService,
   ) {}
 
   @Post()
@@ -96,7 +104,8 @@ export class ChatController {
   @ApiOperation({ summary: 'Inbound webhook (LINE etc.): platform → customer → room → chat in one call' })
   @ApiResponse({ status: 201, description: 'Chat created/updated' })
   @ApiResponse({ status: 400, description: 'Invalid payload or platform not found' })
-  processInbound(@Body() body: InboundWebhookDto) {
+  processInbound(@Body() body: any) {
+    this.logger.debug(`Inbound webhook: ${JSON.stringify(body).substring(0, 500)}`);
     return this.chatService.processInboundWebhook(body);
   }
 
@@ -128,6 +137,33 @@ export class ChatController {
   ) {
     const limitNum = limit ? Math.min(100, Math.max(1, Number(limit))) : 20;
     return this.chatService.findByRoomWithSenderNames(roomId, limitNum, cursor, direction || 'older');
+  }
+
+  @Public()
+  @Get('content/:messageId')
+  @ApiOperation({ summary: 'Proxy LINE message content (image/video/audio)' })
+  @ApiQuery({ name: 'platformId', required: true, type: String })
+  @ApiResponse({ status: 200, description: 'Binary content' })
+  @ApiResponse({ status: 404, description: 'Content not found' })
+  async getContent(
+    @Param('messageId') messageId: string,
+    @Query('platformId') platformId: string,
+    @Res() res: Response,
+  ) {
+    try {
+      const { data, contentType } = await this.lineMessagingService.getMessageContent(
+        platformId,
+        messageId,
+      );
+      res.set({
+        'Content-Type': contentType,
+        'Cache-Control': 'public, max-age=86400',
+      });
+      res.send(data);
+    } catch (error) {
+      this.logger.error(`Failed to get content ${messageId}: ${error.message}`);
+      res.status(HttpStatus.NOT_FOUND).json({ message: 'Content not found' });
+    }
   }
 
   @Get(':id')

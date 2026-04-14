@@ -226,6 +226,41 @@ export class LineMessagingService {
   }
 
   /**
+   * Get message content (binary) for image, video, audio, file messages.
+   * https://developers.line.biz/en/reference/messaging-api/#get-content
+   */
+  async getMessageContent(platformId: string, messageId: string): Promise<{
+    data: Buffer;
+    contentType: string;
+  }> {
+    const accessToken = await this.getAccessToken(platformId);
+    if (!accessToken) {
+      throw new Error(`LINE not configured for platform ${platformId}`);
+    }
+
+    const response = await axios.get(
+      `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        responseType: 'arraybuffer',
+        timeout: 60000,
+      },
+    );
+
+    return {
+      data: Buffer.from(response.data),
+      contentType: response.headers['content-type'] || 'application/octet-stream',
+    };
+  }
+
+  /**
+   * Build a sticker image URL from LINE's CDN.
+   */
+  getStickerUrl(stickerId: string): string {
+    return `https://stickershop.line-scdn.net/stickershop/v1/sticker/${stickerId}/android/sticker.png`;
+  }
+
+  /**
    * Convert LINE message type to our ChatMessageType
    */
   convertMessageType(lineType: string): string {
@@ -235,8 +270,8 @@ export class LineMessagingService {
       video: 'VIDEO',
       audio: 'AUDIO',
       file: 'FILE',
-      sticker: 'TEXT', // Treat stickers as text for now
-      location: 'TEXT', // Treat location as text for now
+      sticker: 'STICKER',
+      location: 'TEXT',
     };
     return typeMap[lineType] || 'TEXT';
   }

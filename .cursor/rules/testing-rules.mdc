@@ -1,0 +1,155 @@
+---
+description: Rules for writing and running unit tests and API tests
+alwaysApply: true
+---
+
+# Testing Rules
+
+## Framework
+
+- **Unit tests**: Jest + @nestjs/testing
+- **E2E tests**: Jest + supertest (config: `test/jest-e2e.json`)
+- **Test files**: `*.spec.ts` co-located with source (unit), `test/*.e2e-spec.ts` (E2E)
+
+## Running Tests
+
+```bash
+npm run test              # Unit tests
+npm run test:watch        # Watch mode
+npm run test:cov          # With coverage report
+npm run test:e2e          # E2E tests
+```
+
+## Unit Test Pattern (Service)
+
+Every service MUST have a `.spec.ts` file. Mock all dependencies.
+
+```typescript
+import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { FeatureService } from './feature.service';
+import { FeatureEntity } from '../../entities';
+
+describe('FeatureService', () => {
+  let service: FeatureService;
+  let repository: jest.Mocked<Repository<FeatureEntity>>;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        FeatureService,
+        {
+          provide: getRepositoryToken(FeatureEntity),
+          useValue: {
+            find: jest.fn(),
+            findOne: jest.fn(),
+            create: jest.fn(),
+            save: jest.fn(),
+            delete: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
+        // Mock other injected services
+        {
+          provide: OtherService,
+          useValue: {
+            methodName: jest.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get<FeatureService>(FeatureService);
+    repository = module.get(getRepositoryToken(FeatureEntity));
+  });
+
+  describe('findAll', () => {
+    it('should return array of entities', async () => {
+      const expected = [{ id: '1' }];
+      repository.find.mockResolvedValue(expected as any);
+      const result = await service.findAll();
+      expect(result).toEqual(expected);
+    });
+  });
+
+  describe('findOne', () => {
+    it('should throw AppException when not found', async () => {
+      repository.findOne.mockResolvedValue(null);
+      await expect(service.findOne('bad-id')).rejects.toThrow();
+    });
+  });
+});
+```
+
+## Unit Test Pattern (Controller)
+
+```typescript
+describe('FeatureController', () => {
+  let controller: FeatureController;
+  let service: jest.Mocked<FeatureService>;
+
+  beforeEach(async () => {
+    const module = await Test.createTestingModule({
+      controllers: [FeatureController],
+      providers: [
+        {
+          provide: FeatureService,
+          useValue: {
+            findAll: jest.fn(),
+            findOne: jest.fn(),
+            create: jest.fn(),
+            update: jest.fn(),
+            remove: jest.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    controller = module.get(FeatureController);
+    service = module.get(FeatureService);
+  });
+});
+```
+
+## E2E Test Pattern
+
+```typescript
+import { INestApplication } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import * as request from 'supertest';
+import { AppModule } from '../src/app.module';
+
+describe('Feature (e2e)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const module = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+    app = module.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(() => app.close());
+
+  it('/feature (GET)', () => {
+    return request(app.getHttpServer())
+      .get('/feature')
+      .expect(200);
+  });
+});
+```
+
+## What to Test
+
+- **Services**: All public methods, error cases (AppException thrown), edge cases
+- **Controllers**: Route mapping, guard behavior, DTO validation
+- **Gateway**: Socket event handlers (use mock socket)
+- **Platform services**: Mock axios calls, test error handling
+
+## Test Naming
+
+- `describe('MethodName')` groups
+- `it('should <expected behavior> when <condition>')` format
+- Test both success and failure paths

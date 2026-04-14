@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsOptional, IsArray, ValidateNested } from 'class-validator';
+import { IsString, IsOptional, IsArray, ValidateNested, Allow } from 'class-validator';
 import { Type } from 'class-transformer';
 
 class WebhookSourceDto {
@@ -7,18 +7,11 @@ class WebhookSourceDto {
   @IsOptional()
   @IsString()
   userId?: string;
-}
-
-class WebhookMessageDto {
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  id?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
-  text?: string;
+  displayName?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -27,17 +20,30 @@ class WebhookMessageDto {
 }
 
 class WebhookEventDto {
-  @ApiPropertyOptional({ type: WebhookSourceDto })
+  @ApiPropertyOptional()
   @IsOptional()
   @ValidateNested()
   @Type(() => WebhookSourceDto)
   source?: WebhookSourceDto;
 
-  @ApiPropertyOptional({ type: WebhookMessageDto })
+  @ApiPropertyOptional()
   @IsOptional()
-  @ValidateNested()
-  @Type(() => WebhookMessageDto)
-  message?: WebhookMessageDto | string;
+  @Allow()
+  message?: any;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  type?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  replyToken?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  timestamp?: number;
 }
 
 export class InboundWebhookDto {

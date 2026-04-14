@@ -1,0 +1,120 @@
+---
+description: Coding conventions and patterns for NestJS backend and Next.js frontend
+alwaysApply: true
+---
+
+# Coding Conventions
+
+## Backend (NestJS)
+
+### Module Pattern
+
+Every feature module follows this structure:
+```
+modules/feature-name/
+  feature-name.module.ts       # @Module with imports, controllers, providers, exports
+  feature-name.controller.ts   # HTTP routes, @UseGuards, @Roles
+  feature-name.service.ts      # Business logic, Repository injection
+  dto/
+    create-feature.dto.ts      # class-validator decorators
+    update-feature.dto.ts
+```
+
+### Entity Conventions
+
+- File: `src/entities/feature-name.entity.ts`
+- Export from `src/entities/index.ts`
+- Register in `app.module.ts` TypeOrmModule entities array
+- Primary key: `@PrimaryGeneratedColumn('uuid')` named `feature_name_id`
+- Timestamps: `@CreateDateColumn({ name: 'create_at' })` or `created_at`
+- Enums: define in entity file, export alongside entity
+- Relations: always specify `onDelete` behavior
+
+```typescript
+@Entity('table_name')
+export class FeatureName {
+  @PrimaryGeneratedColumn('uuid')
+  feature_name_id: string;
+
+  @Column({ type: 'varchar', length: 255 })
+  name: string;
+
+  @CreateDateColumn({ name: 'created_at' })
+  created_at: Date;
+
+  @ManyToOne(() => Parent, (p) => p.children, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'parent_id' })
+  parent: Parent;
+}
+```
+
+### DTO Conventions
+
+- Use `class-validator` decorators: `@IsString()`, `@IsUUID()`, `@IsOptional()`, `@IsEnum()`
+- Use `class-transformer` if needed
+- Extend `PartialType(CreateDto)` for update DTOs
+
+### Error Handling
+
+- Use `AppException(ErrorCode, message, HttpStatus)` from `common/errors`
+- Add new error codes to `ErrorCode` enum in `common/errors/error-codes.ts`
+- Global `GlobalExceptionFilter` shapes all HTTP errors
+
+### Service Pattern
+
+- Inject repositories via `@InjectRepository(Entity)`
+- Use `QueryBuilder` for complex queries, `.find()` for simple ones
+- Always validate existence before operations (throw `AppException` if not found)
+- Logger: `private readonly logger = new Logger(ServiceName.name)`
+
+### Migration
+
+- Generate: `npm run migration:generate src/migrations/TIMESTAMP-Description`
+- Run: `npm run migration:run`
+- Revert: `npm run migration:revert`
+- Never use `synchronize: true` in production
+
+### Auth Guards
+
+- `@UseGuards(JwtAuthGuard, RolesGuard)` + `@Roles(UserRole.ADMIN)` on controller
+- `@Public()` decorator to skip auth on specific routes
+- `@CurrentUser()` decorator to get authenticated user
+
+## Frontend (Next.js)
+
+### Page Pattern (App Router)
+
+- Server Components by default, `'use client'` only when needed
+- Route params in Next.js 16: `params` is a `Promise`, unwrap with `use()`
+- Layout wraps children, pages are leaf components
+
+### Component Conventions
+
+- Functional components only
+- Props interface above component
+- Use `cn()` from `lib/cn.ts` for conditional classNames
+- Tailwind CSS classes inline, no CSS modules
+
+### Hook Conventions
+
+- Custom hooks in `hooks/` directory
+- Use TanStack Query for server state: `useQuery`, `useInfiniteQuery`, `useMutation`
+- Query keys: `['resource', identifier]` pattern
+- Use Zustand for client state (stores/)
+
+### API Calls
+
+- Use `api` instance from `lib/axios.ts` (auto-attaches Bearer token)
+- REST calls via `api.get()`, `api.post()`, etc.
+- Socket events via `useSocket()` hook
+
+### State Management
+
+- **Zustand** for client state (auth token, UI state like active room, filters)
+- **React Query** for server state (rooms, messages, shops)
+- Never duplicate server state in Zustand
+
+### Form Handling
+
+- `react-hook-form` + `@hookform/resolvers/zod`
+- Schemas in `schemas/` directory using `zod`

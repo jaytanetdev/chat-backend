@@ -51,6 +51,21 @@ export class CustomerIdentityService {
     return identity;
   }
 
+  async updateProfile(
+    id: string,
+    displayName?: string | null,
+    avatarUrl?: string | null,
+  ): Promise<CustomerIdentity> {
+    const identity = await this.findOne(id);
+    if (displayName !== undefined && displayName !== null) {
+      identity.display_name = displayName;
+    }
+    if (avatarUrl !== undefined && avatarUrl !== null) {
+      identity.avatar_url = avatarUrl;
+    }
+    return this.customerIdentityRepository.save(identity);
+  }
+
   async findAll(): Promise<CustomerIdentity[]> {
     return this.customerIdentityRepository.find({
       relations: ['platform'],

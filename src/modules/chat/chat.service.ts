@@ -9,7 +9,6 @@ import { RoomService } from '../room/room.service';
 import { CustomerIdentityService } from '../customer-identity/customer-identity.service';
 import { UserPlatformService } from '../user-platform/user-platform.service';
 import { ChatEmitterService } from './chat-emitter.service';
-import { InboundWebhookDto } from './dto/inbound-webhook.dto';
 import { LineMessagingService } from '../line/line-messaging.service';
 import { FacebookMessagingService } from '../facebook/facebook-messaging.service';
 import { InstagramMessagingService } from '../instagram/instagram-messaging.service';
@@ -60,7 +59,7 @@ export class ChatService {
    * 4. Add room members (users linked to this platform via user_platforms)
    * 5. Upsert chat (match on room_id + external_message_id)
    */
-  async processInboundWebhook(body: InboundWebhookDto): Promise<{
+  async processInboundWebhook(body: Record<string, any>): Promise<{
     platform_id: string;
     customer_identity_id: string;
     room_id: string;
@@ -76,18 +75,29 @@ export class ChatService {
       );
     }
     const externalUserId = event.source.userId;
-    const messageText = typeof event.message === 'object' && 'text' in event.message
-      ? (event.message as { text?: string }).text
-      : String(event.message);
-    const externalMessageId = typeof event.message === 'object' && 'id' in event.message
-      ? (event.message as { id?: string }).id
-      : undefined;
-    const rawType = (typeof event.message === 'object' && 'type' in event.message
-      ? (event.message as { type?: string }).type
-      : 'text')?.toUpperCase() || 'TEXT';
+    const msg = typeof event.message === 'object' ? event.message as Record<string, unknown> : null;
+    const externalMessageId = msg?.id as string | undefined;
+    const rawType = ((msg?.type as string) ?? 'text').toUpperCase();
     const messageType = Object.values(ChatMessageType).includes(rawType as ChatMessageType)
       ? (rawType as ChatMessageType)
       : ChatMessageType.TEXT;
+
+    const isMediaType = [ChatMessageType.IMAGE, ChatMessageType.VIDEO, ChatMessageType.AUDIO, ChatMessageType.FILE, ChatMessageType.STICKER].includes(messageType);
+    let messageText: string;
+    if (msg?.text) {
+      messageText = msg.text as string;
+    } else if (isMediaType) {
+      const labelMap: Record<string, string> = {
+        IMAGE: '[รูปภาพ]',
+        VIDEO: '[วิดีโอ]',
+        AUDIO: '[เสียง]',
+        FILE: (msg?.fileName as string) || '[ไฟล์]',
+        STICKER: '[สติกเกอร์]',
+      };
+      messageText = labelMap[messageType] ?? '';
+    } else {
+      messageText = typeof event.message === 'string' ? event.message : '';
+    }
 
     const platform = await this.platformService.findOneByExternalAccountId(destination);
     if (!platform) {
@@ -102,11 +112,24 @@ export class ChatService {
       ? (event.source as { displayName?: string }).displayName
       : undefined;
 
-    const customerIdentity = await this.customerIdentityService.findOrCreate(
+    let customerIdentity = await this.customerIdentityService.findOrCreate(
       platform.platforms_id,
       externalUserId,
       displayName,
     );
+
+    if (!customerIdentity.avatar_url || !customerIdentity.display_name) {
+      try {
+        customerIdentity = await this.fetchAndUpdateCustomerProfile(
+          platform,
+          customerIdentity,
+          externalUserId,
+        );
+        this.logger.debug(`Customer profile updated: ${customerIdentity.display_name} / ${customerIdentity.avatar_url ? 'has avatar' : 'no avatar'}`);
+      } catch (error) {
+        this.logger.warn(`Failed to fetch customer profile for ${externalUserId}: ${error.message}`);
+      }
+    }
 
     let room = await this.roomService.findOneByPlatformAndCustomer(
       platform.platforms_id,
@@ -131,18 +154,18 @@ export class ChatService {
         })
       : null;
 
-    const rawMetadata = typeof event.message === 'object'
-      ? (() => {
-          const { id: _id, text: _text, type: _type, ...rest } = event.message as Record<string, unknown>;
-          return Object.keys(rest).length > 0 ? rest : null;
-        })()
-      : null;
+    const metadata = this.buildMediaMetadata(
+      event.message,
+      externalMessageId,
+      platform.platforms_id,
+      messageType,
+    );
 
     let chat: Chat;
     if (existingChat) {
       existingChat.message = messageText ?? existingChat.message;
       existingChat.message_type = (messageType as ChatMessageType) ?? existingChat.message_type;
-      if (rawMetadata) existingChat.metadata = rawMetadata as Record<string, unknown>;
+      if (metadata) existingChat.metadata = metadata;
       chat = await this.chatRepository.save(existingChat);
     } else {
       chat = this.chatRepository.create({
@@ -153,7 +176,7 @@ export class ChatService {
         external_message_id: externalMessageId ?? null,
         message: messageText ?? '',
         message_type: (messageType as ChatMessageType) || ChatMessageType.TEXT,
-        metadata: rawMetadata as Record<string, unknown> | null,
+        metadata,
         is_read: false,
       });
       chat = await this.chatRepository.save(chat);
@@ -241,7 +264,7 @@ export class ChatService {
       .addSelect(
         `CASE
           WHEN c.sender_type = 'ADMIN' THEN u.username
-          WHEN c.sender_type = 'CUSTOMER' THEN ci.external_user_id
+          WHEN c.sender_type = 'CUSTOMER' THEN COALESCE(ci.display_name, ci.external_user_id)
           ELSE 'system'
         END`,
         'sender_name',
@@ -343,5 +366,109 @@ export class ChatService {
         HttpStatus.BAD_GATEWAY,
       );
     }
+  }
+
+  /**
+   * Build metadata with content URLs for media messages.
+   *
+   * LINE contentProvider.type == "line"  → proxy via /chats/content/:msgId
+   * LINE contentProvider.type == "external" → use originalContentUrl directly
+   * LINE sticker → LINE CDN sticker URL
+   * LINE file → proxy + keep fileName / fileSize
+   */
+  private buildMediaMetadata(
+    message: Record<string, unknown> | unknown,
+    externalMessageId: string | undefined,
+    platformId: string,
+    messageType: string,
+  ): Record<string, unknown> | null {
+    if (typeof message !== 'object' || !message) return null;
+    const msg = message as Record<string, unknown>;
+
+    // Sticker — resolve from LINE CDN
+    if (messageType === 'STICKER') {
+      const stickerId = msg.stickerId as string | undefined;
+      const packageId = msg.packageId as string | undefined;
+      if (stickerId) {
+        const resourceType = (msg.stickerResourceType as string) ?? 'STATIC';
+        return {
+          stickerId,
+          packageId,
+          stickerResourceType: resourceType,
+          url: `https://stickershop.line-scdn.net/stickershop/v1/sticker/${stickerId}/android/sticker.png;compress=true`,
+        };
+      }
+      return null;
+    }
+
+    // Image / Video / Audio / File — need a content URL
+    const downloadableTypes = ['IMAGE', 'VIDEO', 'AUDIO', 'FILE'];
+    if (!downloadableTypes.includes(messageType)) return null;
+
+    const contentProvider = msg.contentProvider as
+      | { type?: string; originalContentUrl?: string; previewImageUrl?: string }
+      | undefined;
+
+    // External provider already has a public URL
+    if (contentProvider?.type === 'external' && contentProvider.originalContentUrl) {
+      return {
+        url: contentProvider.originalContentUrl,
+        previewUrl: contentProvider.previewImageUrl || contentProvider.originalContentUrl,
+        ...(msg.fileName ? { fileName: msg.fileName } : {}),
+        ...(msg.fileSize ? { fileSize: msg.fileSize } : {}),
+      };
+    }
+
+    // LINE-hosted content — proxy through our backend
+    if (externalMessageId) {
+      const proxyUrl = `/chats/content/${externalMessageId}?platformId=${platformId}`;
+      return {
+        url: proxyUrl,
+        previewUrl: proxyUrl,
+        ...(msg.fileName ? { fileName: msg.fileName } : {}),
+        ...(msg.fileSize ? { fileSize: msg.fileSize } : {}),
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Fetch customer profile from external platform API and update CustomerIdentity.
+   * Non-critical — callers should catch errors so webhook processing continues.
+   */
+  private async fetchAndUpdateCustomerProfile(
+    platform: { platforms_id: string; platform_type: PlatformType },
+    customerIdentity: import('../../entities').CustomerIdentity,
+    externalUserId: string,
+  ): Promise<import('../../entities').CustomerIdentity> {
+    let displayName: string | undefined;
+    let avatarUrl: string | undefined;
+
+    switch (platform.platform_type) {
+      case PlatformType.LINE: {
+        const isConfigured = await this.lineMessagingService.isConfigured(platform.platforms_id);
+        if (!isConfigured) break;
+        const profile = await this.lineMessagingService.getUserProfile(
+          platform.platforms_id,
+          externalUserId,
+        );
+        displayName = profile.displayName;
+        avatarUrl = profile.pictureUrl;
+        break;
+      }
+      default:
+        this.logger.debug(`Profile fetch not implemented for ${platform.platform_type}`);
+        return customerIdentity;
+    }
+
+    if (displayName || avatarUrl) {
+      return this.customerIdentityService.updateProfile(
+        customerIdentity.customer_identity_id,
+        displayName,
+        avatarUrl,
+      );
+    }
+    return customerIdentity;
   }
 }
